@@ -25,4 +25,10 @@ class ProgramMathTest {
     fun calculatesNinetyPercentTrainingMax() {
         assertEquals(90.0, ProgramMath.trainingMax(100.0, 0.90), 0.0001)
     }
+    @Test
+    fun estimatesOneRepMaxAndKeepsSinglesExact() {
+        assertEquals(100.0, ProgramMath.estimatedOneRepMax(100.0, 1), 0.0001)
+        assertEquals(116.6667, ProgramMath.estimatedOneRepMax(100.0, 5), 0.001)
+    }
+
 }

@@ -2,6 +2,10 @@ package com.example.fivethreeonelifter
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.Manifest
+import android.app.NotificationManager
+import android.content.pm.PackageManager
+import android.os.Build
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -14,6 +18,7 @@ import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
@@ -24,6 +29,7 @@ import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import java.time.Instant
+import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -41,6 +47,10 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         db = WorkoutDb(this)
+        window.statusBarColor = COLOR_BACKGROUND
+        window.navigationBarColor = COLOR_SURFACE
+        NotificationScheduler.createChannel(this)
+        NotificationScheduler.scheduleAll(this)
         showDashboard()
     }
 
@@ -58,7 +68,7 @@ class MainActivity : Activity() {
             root.addView(card().apply {
                 addView(text("Workout in progress", 18f, true))
                 addView(text(active.templateName, 16f))
-                addView(text("${active.completedSets}/${active.totalSets} sets ticked · started ${formatTime(active.startedAt)}", 14f, false, Color.DKGRAY))
+                addView(text("${active.completedSets}/${active.totalSets} sets ticked · started ${formatTime(active.startedAt)}", 14f, false, COLOR_MUTED))
                 addView(space(10))
                 addView(button("Resume workout") { showActiveWorkout(active.id) })
             })
@@ -69,7 +79,7 @@ class MainActivity : Activity() {
         val cycle = db.getSettingInt("cycle", 1)
         root.addView(card().apply {
             addView(text("5/3/1 cycle $cycle · week $week", 18f, true))
-            addView(text(weekName(week), 14f, false, Color.DKGRAY))
+            addView(text(weekName(week), 14f, false, COLOR_MUTED))
             addView(text("Any exercise using 5/3/1 uses this week and its own Training Max. Manual exercises use their saved set/rep/weight defaults.", 14f))
             addView(space(8))
             addView(button(if (week == 4) "Finish deload + progress Training Maxes" else "Advance to week ${week + 1}") {
@@ -77,6 +87,26 @@ class MainActivity : Activity() {
                 toast(if (newWeek == 1) "Cycle $newCycle started. 5/3/1 Training Max increments applied." else "Moved to week $newWeek.")
                 showDashboard()
             })
+        })
+
+        root.addView(sectionTitle("Workout schedule"))
+        val schedule = db.getWorkoutSchedule()
+        val todayDay = LocalDate.now().dayOfWeek.value
+        val todayPlan = schedule.firstOrNull { it.dayOfWeek == todayDay && it.templateId != null }
+        root.addView(tintedCard(if (todayPlan != null) COLOR_TEAL_SOFT else COLOR_SURFACE).apply {
+            if (todayPlan != null) {
+                addView(text("Today · ${todayPlan.templateName}", 19f, true))
+                addView(text("Your scheduled workout is ready. Reminders stop after you complete it.", 13f, false, COLOR_MUTED))
+                addView(space(8))
+            } else {
+                addView(text("Wednesday · Friday · Saturday · Sunday", 17f, true))
+            }
+            val summary = schedule.joinToString("  •  ") { item ->
+                "${shortDay(item.dayOfWeek)}: ${item.templateName ?: "—"}"
+            }
+            addView(text(summary, 13f, false, COLOR_MUTED))
+            addView(space(8))
+            addView(softButton("Manage schedule & reminders") { showSchedule() })
         })
 
         root.addView(sectionTitle("Start from a template"))
@@ -106,7 +136,7 @@ class MainActivity : Activity() {
         root.addView(sectionTitle("Training heatmap"))
         root.addView(card().apply {
             addView(text("Last 12 weeks", 17f, true))
-            addView(text("Darker squares mean more completed workouts that day.", 13f, false, Color.DKGRAY))
+            addView(text("Darker squares mean more completed workouts that day.", 13f, false, COLOR_MUTED))
             addView(HeatmapView(this@MainActivity).apply { counts = db.workoutCountsByDate() })
         })
 
@@ -123,8 +153,9 @@ class MainActivity : Activity() {
 
     private fun showExercises() {
         setScreen("Exercises", showNav = true)
-        root.addView(button("+ Add exercise") { showExerciseEditor(null) })
-        root.addView(sectionTitle("Exercise library"))
+        root.addView(button("+ Create custom exercise") { showExerciseEditor(null) })
+        root.addView(infoCard("Popular Chest, Back, Legs, Arms and Shoulders exercises are available as quick-add presets while you build a workout template. Selecting one automatically adds it to this library too."))
+        root.addView(sectionTitle("Your exercise library"))
 
         val exercises = db.getExercises()
         if (exercises.isEmpty()) {
@@ -140,15 +171,23 @@ class MainActivity : Activity() {
             }
             root.addView(card().apply {
                 addView(text(exercise.name, 18f, true))
-                addView(text(subtitle, 14f, false, Color.DKGRAY))
+                addView(text(subtitle, 14f, false, COLOR_MUTED))
                 addView(space(8))
                 addView(button("Edit") { showExerciseEditor(exercise) })
             }, matchWrapWithMargin(5))
         }
     }
 
-    private fun showExerciseEditor(existing: Exercise?) {
-        setScreen(if (existing == null) "Add exercise" else "Edit exercise", showNav = false, backAction = { showExercises() })
+    private fun showExerciseEditor(
+        existing: Exercise?,
+        backAction: (() -> Unit)? = null,
+        onSaved: ((Long) -> Unit)? = null
+    ) {
+        setScreen(
+            if (existing == null) "Add exercise" else "Edit exercise",
+            showNav = false,
+            backAction = backAction ?: { showExercises() }
+        )
 
         val c = card()
         val name = textInput("Exercise name", existing?.name ?: "")
@@ -201,7 +240,7 @@ class MainActivity : Activity() {
                 mode == Exercise.MODE_531 && (tmValue <= 0 || roundValue <= 0 || incValue <= 0) -> toast("5/3/1 needs a Training Max, rounding value, and cycle increment above zero.")
                 mode == Exercise.MODE_MANUAL && (setsValue <= 0 || minValue <= 0 || maxValue < minValue || weightValue < 0) -> toast("Check the manual sets, reps, and weight.")
                 else -> {
-                    db.saveExercise(
+                    val savedId = db.saveExercise(
                         Exercise(
                             id = existing?.id ?: 0,
                             name = exerciseName,
@@ -218,7 +257,7 @@ class MainActivity : Activity() {
                         )
                     )
                     toast("Exercise saved.")
-                    showExercises()
+                    if (onSaved != null) onSaved(savedId) else showExercises()
                 }
             }
         })
@@ -226,7 +265,7 @@ class MainActivity : Activity() {
 
         if (existing != null) {
             root.addView(space(12))
-            root.addView(button("Delete exercise") {
+            root.addView(dangerButton("Delete exercise") {
                 confirm("Delete ${existing.name}?", "It will also be removed from templates. Completed workout history keeps its saved exercise name and sets.") {
                     db.deleteExercise(existing.id)
                     showExercises()
@@ -261,7 +300,7 @@ class MainActivity : Activity() {
                 val count = db.getTemplateExercises(template.id).size
                 root.addView(card().apply {
                     addView(text(template.name, 18f, true))
-                    addView(text("$count exercises", 14f, false, Color.DKGRAY))
+                    addView(text("$count exercises", 14f, false, COLOR_MUTED))
                     addView(space(8))
                     addView(button("Edit template") { showTemplateEditor(template) })
                 }, matchWrapWithMargin(5))
@@ -292,21 +331,63 @@ class MainActivity : Activity() {
         selected.forEachIndexed { index, exercise ->
             root.addView(card().apply {
                 addView(text("${index + 1}. ${exercise.name}", 17f, true))
-                addView(text(if (exercise.isFiveThreeOne) "5/3/1 formula" else "${exercise.defaultSets} × ${repRange(exercise)} @ ${formatKg(exercise.defaultWeight)}", 13f, false, Color.DKGRAY))
+                addView(text(if (exercise.isFiveThreeOne) "5/3/1 formula" else "${exercise.defaultSets} × ${repRange(exercise)} @ ${formatKg(exercise.defaultWeight)}", 13f, false, COLOR_MUTED))
                 addView(space(6))
-                addView(button("Remove from template") {
+                addView(softButton("Edit exercise settings") {
+                    showExerciseEditor(
+                        existing = exercise,
+                        backAction = { showTemplateEditor(template) },
+                        onSaved = { showTemplateEditor(template) }
+                    )
+                })
+                addView(space(4))
+                addView(dangerButton("Remove from template") {
                     db.removeExerciseFromTemplate(template.id, exercise.id)
                     showTemplateEditor(template)
                 })
             }, matchWrapWithMargin(4))
         }
 
-        root.addView(sectionTitle("Add exercise"))
+        root.addView(sectionTitle("Quick add popular exercises"))
+        root.addView(infoCard("Pick a preset below and it will be added to your exercise library and this template automatically. If you already customised an exercise with the same name, your existing settings are kept."))
+
+        val selectedNames = selected.map { it.name.trim().lowercase(Locale.US) }.toSet()
+        ExercisePresets.categories.forEach { category ->
+            val available = ExercisePresets.inCategory(category)
+                .filter { it.name.trim().lowercase(Locale.US) !in selectedNames }
+            if (available.isNotEmpty()) {
+                val categoryCard = card()
+                categoryCard.addView(text(category, 17f, true))
+                categoryCard.addView(text("Tap an exercise to add it", 12f, false, COLOR_MUTED))
+                categoryCard.addView(space(6))
+                available.forEach { preset ->
+                    categoryCard.addView(softButton("+ ${preset.name}") {
+                        val exerciseId = db.ensureExercise(preset.toExercise())
+                        db.addExerciseToTemplate(template.id, exerciseId)
+                        toast("${preset.name} added.")
+                        showTemplateEditor(template)
+                    }, matchWithMargin(46, 2))
+                }
+                root.addView(categoryCard, matchWrapWithMargin(5))
+            }
+        }
+
+        root.addView(space(6))
+        root.addView(button("+ Create custom exercise for this template") {
+            showExerciseEditor(
+                existing = null,
+                backAction = { showTemplateEditor(template) },
+                onSaved = { exerciseId ->
+                    db.addExerciseToTemplate(template.id, exerciseId)
+                    showTemplateEditor(template)
+                }
+            )
+        })
+
+        root.addView(sectionTitle("Add from your exercise library"))
         val allExercises = db.getExercises()
         if (allExercises.isEmpty()) {
-            root.addView(infoCard("There are no exercises in your library yet."))
-            root.addView(space(6))
-            root.addView(button("Add an exercise") { showExerciseEditor(null) })
+            root.addView(infoCard("Your personal library is empty. Use a popular preset above or create a custom exercise."))
         } else {
             val addCard = card()
             val spinner = Spinner(this)
@@ -321,12 +402,103 @@ class MainActivity : Activity() {
         }
 
         root.addView(space(14))
-        root.addView(button("Delete template") {
+        root.addView(dangerButton("Delete template") {
             confirm("Delete ${template.name}?", "Completed workout history will remain.") {
                 db.deleteTemplate(template.id)
                 showTemplates()
             }
         })
+    }
+
+    private fun showSchedule() {
+        setScreen("Schedule & reminders", showNav = false, backAction = { showDashboard() })
+
+        root.addView(infoCard("Assign one of your workout templates to each training day. LiftLog will remind you at the times below until that day's assigned workout is completed."))
+
+        val templates = db.getTemplates()
+        if (templates.isEmpty()) {
+            root.addView(space(8))
+            root.addView(infoCard("Create at least one workout template before assigning your training days."))
+            root.addView(space(8))
+            root.addView(button("Create a template") { showTemplates() })
+            return
+        }
+
+        root.addView(sectionTitle("Training days"))
+        val current = db.getWorkoutSchedule().associateBy { it.dayOfWeek }
+        val daySpinners = linkedMapOf<Int, Spinner>()
+        listOf(3, 5, 6, 7).forEach { day ->
+            val c = card()
+            c.addView(text(fullDay(day), 17f, true))
+            val spinner = Spinner(this)
+            val labels = listOf("No workout") + templates.map { it.name }
+            spinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, labels)
+            val selectedTemplateId = current[day]?.templateId
+            val selectedIndex = templates.indexOfFirst { it.id == selectedTemplateId }
+            spinner.setSelection(if (selectedIndex >= 0) selectedIndex + 1 else 0)
+            c.addView(spinner, matchWithMargin(54, 5))
+            root.addView(c, matchWrapWithMargin(4))
+            daySpinners[day] = spinner
+        }
+
+        root.addView(sectionTitle("Reminder times"))
+        root.addView(infoCard("Four reminders are scheduled on each assigned training day. Android may deliver them a little later during battery-saving modes; exact alarm permission is not required."))
+        val timeCard = card()
+        val labels = listOf("Morning", "Midday", "After work", "Evening")
+        val savedTimes = NotificationScheduler.reminderTimes(db)
+        val timeInputs = mutableListOf<EditText>()
+        labels.forEachIndexed { index, labelText ->
+            timeCard.addView(label("$labelText reminder · 24-hour HH:mm"))
+            val input = textInput("HH:mm", savedTimes[index])
+            input.inputType = InputType.TYPE_CLASS_DATETIME or InputType.TYPE_DATETIME_VARIATION_TIME
+            timeCard.addView(input, matchWithMargin(52, 3))
+            timeInputs += input
+        }
+        root.addView(timeCard)
+
+        val notificationsEnabled = getSystemService(NotificationManager::class.java).areNotificationsEnabled()
+        root.addView(space(8))
+        root.addView(infoCard(if (notificationsEnabled) "Notifications are enabled for LiftLog." else "Notifications are currently disabled. Saving will ask Android for notification permission where required."))
+        root.addView(space(10))
+        root.addView(button("Save workout schedule") {
+            val times = timeInputs.map { it.text.toString().trim() }
+            if (times.any { !NotificationScheduler.isValidTime(it) }) {
+                toast("Use 24-hour times like 08:30 or 17:30.")
+                return@button
+            }
+            daySpinners.forEach { (day, spinner) ->
+                val position = spinner.selectedItemPosition
+                val templateId = if (position <= 0) null else templates[position - 1].id
+                db.setScheduledTemplate(day, templateId)
+            }
+            NotificationScheduler.saveReminderTimes(db, times)
+            requestNotificationPermissionIfNeeded()
+            NotificationScheduler.scheduleAll(this)
+            toast("Schedule and reminders saved.")
+            showDashboard()
+        })
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 4310)
+        }
+    }
+
+    private fun shortDay(day: Int): String = when (day) {
+        3 -> "Wed"
+        5 -> "Fri"
+        6 -> "Sat"
+        7 -> "Sun"
+        else -> "Day"
+    }
+
+    private fun fullDay(day: Int): String = when (day) {
+        3 -> "Wednesday"
+        5 -> "Friday"
+        6 -> "Saturday"
+        7 -> "Sunday"
+        else -> "Day"
     }
 
     private fun showActiveWorkout(workoutId: Long) {
@@ -343,9 +515,9 @@ class MainActivity : Activity() {
 
         val timerCard = card()
         val elapsed = text("00:00", 28f, true)
-        timerCard.addView(text("Workout timer", 14f, false, Color.DKGRAY))
+        timerCard.addView(text("Workout timer", 14f, false, COLOR_MUTED))
         timerCard.addView(elapsed)
-        timerCard.addView(text("Started ${formatDateTime(workout.startedAt)}", 13f, false, Color.DKGRAY))
+        timerCard.addView(text("Started ${formatDateTime(workout.startedAt)}", 13f, false, COLOR_MUTED))
         root.addView(timerCard)
         startElapsedTimer(workout.startedAt, elapsed)
 
@@ -369,7 +541,7 @@ class MainActivity : Activity() {
         db.getWorkoutExercises(workoutId).forEach { exerciseRecord ->
             val exerciseCard = card()
             exerciseCard.addView(text(exerciseRecord.exerciseName, 19f, true))
-            exerciseCard.addView(text(if (exerciseRecord.mode == Exercise.MODE_531) "5/3/1 calculated weights · edit any weight if needed" else "Manual prescription · edit weight or actual reps as you train", 13f, false, Color.DKGRAY))
+            exerciseCard.addView(text(if (exerciseRecord.mode == Exercise.MODE_531) "5/3/1 calculated weights · edit any weight if needed" else "Manual prescription · edit weight or actual reps as you train", 13f, false, COLOR_MUTED))
             exerciseCard.addView(space(6))
 
             db.getWorkoutSets(exerciseRecord.id).forEach { set ->
@@ -380,7 +552,7 @@ class MainActivity : Activity() {
 
         root.addView(space(14))
         val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        actions.addView(button("Discard") {
+        actions.addView(dangerButton("Discard") {
             confirm("Discard this workout?", "The active workout and its set entries will be deleted and will not appear in history.") {
                 db.discardWorkout(workoutId)
                 stopUiTimers()
@@ -437,14 +609,58 @@ class MainActivity : Activity() {
 
     private fun finishWorkout(workoutId: Long) {
         db.completeWorkout(workoutId)
+        NotificationScheduler.dismissDay(this, LocalDate.now().dayOfWeek.value)
         stopUiTimers()
         toast("Workout saved to history.")
         showHistoryDetail(workoutId)
     }
 
     private fun showHistory() {
-        setScreen("Workout history", showNav = true)
+        setScreen("History", showNav = true)
         val workouts = db.getCompletedWorkouts()
+        val overview = db.getHistoryOverview()
+
+        root.addView(text("Your training", 24f, true))
+        root.addView(text("Volume, consistency and personal records from completed sessions.", 14f, false, COLOR_MUTED))
+        root.addView(space(10))
+        root.addView(tintedCard(COLOR_PRIMARY_SOFT).apply {
+            addView(statRow(
+                "Workouts" to overview.totalWorkouts.toString(),
+                "Last 30d" to overview.workoutsLast30Days.toString(),
+                "Sets" to overview.totalCompletedSets.toString()
+            ))
+            addView(space(10))
+            addView(statRow(
+                "Volume" to formatVolume(overview.totalVolume),
+                "Reps" to overview.totalReps.toString(),
+                "Avg time" to formatCompactDuration(overview.averageDurationSeconds)
+            ))
+        })
+
+        val records = db.getPersonalRecords()
+        root.addView(sectionTitle("Personal records"))
+        if (records.isEmpty()) {
+            root.addView(infoCard("Log reps on completed sets and your PRs will appear here automatically."))
+        } else {
+            records.forEach { record ->
+                root.addView(card().apply {
+                    addView(horizontalTitle(record.exerciseName, "PR"))
+                    addView(space(7))
+                    addView(statRow(
+                        "Heaviest" to formatKg(record.heaviestWeight),
+                        "At weight" to "${record.heaviestWeightReps} reps",
+                        "Est. 1RM" to formatKg(record.estimatedOneRepMax)
+                    ))
+                    addView(space(7))
+                    addView(text(
+                        "e1RM best: ${formatKg(record.e1rmWeight)} × ${record.e1rmReps} · ${formatDate(record.e1rmAt)}",
+                        13f, false, COLOR_MUTED
+                    ))
+                }, matchWrapWithMargin(4))
+            }
+        }
+
+        root.addView(sectionTitle("Workout history"))
         if (workouts.isEmpty()) {
             root.addView(infoCard("No completed workouts yet."))
             return
@@ -453,13 +669,23 @@ class MainActivity : Activity() {
     }
 
     private fun addHistorySummary(summary: WorkoutSummary) {
+        val stats = db.getWorkoutStats(summary.id)
         root.addView(card().apply {
-            addView(text(summary.templateName, 18f, true))
-            addView(text("${formatDate(summary.completedAt ?: summary.startedAt)} · ${durationText(summary.startedAt, summary.completedAt)}", 14f, false, Color.DKGRAY))
-            addView(text("${summary.completedSets}/${summary.totalSets} sets completed", 14f))
-            addView(space(7))
-            addView(button("View workout") { showHistoryDetail(summary.id) })
-        }, matchWrapWithMargin(4))
+            addView(text(summary.templateName, 19f, true))
+            addView(text("${formatDate(summary.completedAt ?: summary.startedAt)} · ${formatCompactDuration(stats.durationSeconds)}", 13f, false, COLOR_MUTED))
+            addView(space(9))
+            addView(statRow(
+                "Volume" to formatVolume(stats.totalVolume),
+                "Reps" to stats.totalReps.toString(),
+                "Sets" to "${stats.completedSets}/${stats.totalSets}"
+            ))
+            if (stats.prCount > 0) {
+                addView(space(8))
+                addView(prPill("★ ${stats.prCount} PR${if (stats.prCount == 1) "" else "s"}"))
+            }
+            addView(space(9))
+            addView(softButton("View workout") { showHistoryDetail(summary.id) })
+        }, matchWrapWithMargin(5))
     }
 
     private fun showHistoryDetail(workoutId: Long) {
@@ -468,28 +694,65 @@ class MainActivity : Activity() {
             return
         }
         setScreen("Workout summary", showNav = false, backAction = { showHistory() })
+        val stats = db.getWorkoutStats(workoutId)
+        val exerciseStats = db.getExerciseWorkoutStats(workoutId).associateBy { it.workoutExerciseId }
+        val prSets = db.getWorkoutPrSetIds(workoutId)
 
-        root.addView(card().apply {
-            addView(text(workout.templateName, 21f, true))
-            addView(text(formatDateTime(workout.completedAt ?: workout.startedAt), 15f))
-            addView(text("Duration: ${durationText(workout.startedAt, workout.completedAt)}", 14f, false, Color.DKGRAY))
-            addView(text("${workout.completedSets}/${workout.totalSets} sets completed", 14f))
+        root.addView(tintedCard(COLOR_PRIMARY_SOFT).apply {
+            addView(text(workout.templateName, 24f, true))
+            addView(text(formatDateTime(workout.completedAt ?: workout.startedAt), 14f, false, COLOR_MUTED))
+            addView(space(12))
+            addView(statRow(
+                "Volume" to formatVolume(stats.totalVolume),
+                "Reps" to stats.totalReps.toString(),
+                "Duration" to formatCompactDuration(stats.durationSeconds)
+            ))
+            addView(space(10))
+            addView(statRow(
+                "Exercises" to stats.exerciseCount.toString(),
+                "Sets" to "${stats.completedSets}/${stats.totalSets}",
+                "Top load" to formatKg(stats.topWeight)
+            ))
+            if (stats.prCount > 0) {
+                addView(space(10))
+                addView(prPill("★ ${stats.prCount} personal record${if (stats.prCount == 1) "" else "s"} in this workout"))
+            }
         })
 
-        root.addView(sectionTitle("Workout log"))
+        root.addView(sectionTitle("Exercise breakdown"))
         db.getWorkoutExercises(workoutId).forEach { exercise ->
+            val exStats = exerciseStats[exercise.id]
             val c = card()
-            c.addView(text(exercise.exerciseName, 18f, true))
+            c.addView(text(exercise.exerciseName, 19f, true))
+            if (exStats != null) {
+                c.addView(text(
+                    "${exStats.completedSets}/${exStats.totalSets} sets · ${exStats.totalReps} reps · ${formatVolume(exStats.volume)} volume",
+                    13f, false, COLOR_MUTED
+                ))
+                if (exStats.topWeight > 0) {
+                    c.addView(text("Top load ${formatKg(exStats.topWeight)} · est. 1RM ${formatKg(exStats.estimatedOneRepMax)}", 13f, false, COLOR_MUTED))
+                }
+            }
+            c.addView(space(8))
             db.getWorkoutSets(exercise.id).forEach { set ->
                 val pct = set.percentage?.let { " · ${(it * 100).toInt()}%" } ?: ""
                 val actualReps = set.actualReps?.toString() ?: "—"
                 val tick = if (set.completed) "✓" else "○"
-                c.addView(text("$tick Set ${set.setNumber}: ${formatKg(set.actualWeight)} × $actualReps reps · target ${set.targetReps}$pct", 14f))
+                val setLine = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(0, dp(5), 0, dp(5))
+                    addView(text("$tick Set ${set.setNumber}  ${formatKg(set.actualWeight)} × $actualReps", 14f, true))
+                    addView(text("Target ${set.targetReps}$pct · planned ${formatKg(set.plannedWeight)}", 12f, false, COLOR_MUTED))
+                    prSets[set.id]?.forEach { badge ->
+                        addView(prPill(if (badge == "WEIGHT PR") "★ Weight PR" else "★ e1RM PR"))
+                    }
+                }
+                c.addView(setLine)
             }
-            root.addView(c, matchWrapWithMargin(4))
+            root.addView(c, matchWrapWithMargin(5))
         }
         root.addView(space(12))
-        root.addView(button("Back to dashboard") { showDashboard() })
+        root.addView(softButton("Back to history") { showHistory() })
     }
 
     private fun startElapsedTimer(startedAt: Long, target: TextView) {
@@ -534,65 +797,95 @@ class MainActivity : Activity() {
 
     private fun setScreen(title: String, showNav: Boolean, backAction: (() -> Unit)? = null) {
         stopUiTimers()
-        val scroll = ScrollView(this)
+        val screen = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(COLOR_BACKGROUND)
+        }
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            clipToPadding = false
+        }
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(30))
-            setBackgroundColor(Color.rgb(247, 248, 249))
+            setPadding(dp(16), dp(16), dp(16), dp(28))
+            setBackgroundColor(COLOR_BACKGROUND)
+        }
+        screen.setOnApplyWindowInsetsListener { _, insets ->
+            val statusBarHeight = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                insets.getInsets(WindowInsets.Type.statusBars() or WindowInsets.Type.displayCutout()).top
+            } else {
+                @Suppress("DEPRECATION")
+                insets.systemWindowInsetTop
+            }
+            root.setPadding(dp(16), statusBarHeight + dp(16), dp(16), dp(28))
+            insets
         }
         scroll.addView(root, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        setContentView(scroll)
+        screen.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
         if (backAction != null) {
-            header.addView(compactButton("‹ Back") { backAction() }, LinearLayout.LayoutParams(dp(92), dp(46)).apply { rightMargin = dp(8) })
+            header.addView(ghostButton("‹ Back") { backAction() }, LinearLayout.LayoutParams(dp(92), dp(44)).apply { rightMargin = dp(8) })
         }
         header.addView(text(title, 28f, true), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(header)
+        root.addView(space(14))
 
         if (showNav) {
-            root.addView(space(10))
-            val nav = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            val navItems: List<Pair<String, () -> Unit>> = listOf(
-                "Home" to { showDashboard() },
-                "Exercises" to { showExercises() },
-                "Templates" to { showTemplates() },
-                "History" to { showHistory() }
-            )
-            navItems.forEach { (label, action) ->
-                nav.addView(compactButton(label, action), LinearLayout.LayoutParams(0, dp(44), 1f).apply { setMargins(dp(2), 0, dp(2), 0) })
-            }
-            root.addView(nav)
+            screen.addView(bottomNav(title), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(68)))
         }
-        root.addView(space(14))
+        setContentView(screen)
+    }
+
+    private fun bottomNav(title: String): View {
+        val nav = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(7), dp(8), dp(7))
+            elevation = dp(10).toFloat()
+            background = GradientDrawable().apply { setColor(COLOR_SURFACE) }
+        }
+        val items: List<Triple<String, Boolean, () -> Unit>> = listOf(
+            Triple("⌂\nHome", title == "LiftLog", { showDashboard() }),
+            Triple("＋\nExercises", title == "Exercises", { showExercises() }),
+            Triple("▦\nTemplates", title == "Templates", { showTemplates() }),
+            Triple("◷\nHistory", title == "History", { showHistory() })
+        )
+        items.forEach { (label, selected, action) ->
+            nav.addView(navButton(label, selected, action), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
+                setMargins(dp(3), 0, dp(3), 0)
+            })
+        }
+        return nav
     }
 
     private fun card(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         setPadding(dp(15), dp(15), dp(15), dp(15))
-        background = GradientDrawable().apply {
-            setColor(Color.WHITE)
-            cornerRadius = dp(14).toFloat()
-            setStroke(dp(1), Color.rgb(225, 228, 231))
-        }
+        elevation = dp(1).toFloat()
+        background = roundedBackground(COLOR_SURFACE, COLOR_BORDER, 16)
     }
 
-    private fun infoCard(message: String): View = card().apply {
-        addView(text(message, 14f, false, Color.DKGRAY))
+    private fun tintedCard(color: Int): LinearLayout = card().apply {
+        background = roundedBackground(color, color, 18)
+    }
+
+    private fun infoCard(message: String): View = tintedCard(COLOR_TEAL_SOFT).apply {
+        addView(text(message, 14f, false, COLOR_MUTED))
     }
 
     private fun sectionTitle(value: String): TextView = text(value, 18f, true).apply {
-        setPadding(0, dp(18), 0, dp(6))
+        setPadding(0, dp(20), 0, dp(7))
     }
 
     private fun label(value: String): TextView = text(value, 14f, true).apply {
         setPadding(0, dp(9), 0, 0)
     }
 
-    private fun text(value: String, size: Float, bold: Boolean = false, color: Int = Color.rgb(25, 30, 34)): TextView =
+    private fun text(value: String, size: Float, bold: Boolean = false, color: Int = COLOR_TEXT): TextView =
         TextView(this).apply {
             text = value
             textSize = size
@@ -601,16 +894,75 @@ class MainActivity : Activity() {
             setLineSpacing(0f, 1.12f)
         }
 
-    private fun button(label: String, click: () -> Unit): Button = Button(this).apply {
+    private fun button(label: String, click: () -> Unit): Button = styledButton(label, COLOR_PRIMARY, Color.WHITE, click)
+
+    private fun softButton(label: String, click: () -> Unit): Button = styledButton(label, COLOR_PRIMARY_SOFT, COLOR_PRIMARY, click)
+
+    private fun ghostButton(label: String, click: () -> Unit): Button = styledButton(label, Color.TRANSPARENT, COLOR_PRIMARY, click, stroke = COLOR_BORDER)
+
+    private fun dangerButton(label: String, click: () -> Unit): Button = styledButton(label, COLOR_DANGER_SOFT, COLOR_DANGER, click)
+
+    private fun styledButton(label: String, bg: Int, fg: Int, click: () -> Unit, stroke: Int? = null): Button = Button(this).apply {
         text = label
         isAllCaps = false
         textSize = 14f
+        setTextColor(fg)
+        setTypeface(typeface, Typeface.BOLD)
+        stateListAnimator = null
+        background = GradientDrawable().apply {
+            setColor(bg)
+            cornerRadius = dp(12).toFloat()
+            if (stroke != null) setStroke(dp(1), stroke)
+        }
         setOnClickListener { click() }
     }
 
-    private fun compactButton(label: String, click: () -> Unit): Button = button(label, click).apply {
+    private fun compactButton(label: String, click: () -> Unit): Button = softButton(label, click).apply {
         setPadding(dp(3), 0, dp(3), 0)
         textSize = 12f
+    }
+
+    private fun navButton(label: String, selected: Boolean, click: () -> Unit): Button = styledButton(
+        label,
+        if (selected) COLOR_PRIMARY_SOFT else Color.TRANSPARENT,
+        if (selected) COLOR_PRIMARY else COLOR_MUTED,
+        click
+    ).apply {
+        textSize = 11f
+        setPadding(dp(2), 0, dp(2), 0)
+        gravity = Gravity.CENTER
+    }
+
+    private fun statRow(vararg stats: Pair<String, String>): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        stats.forEachIndexed { index, (label, value) ->
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                addView(text(value, 17f, true).apply { gravity = Gravity.CENTER })
+                addView(text(label, 11f, false, COLOR_MUTED).apply { gravity = Gravity.CENTER })
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                if (index > 0) leftMargin = dp(4)
+            })
+        }
+    }
+
+    private fun horizontalTitle(title: String, badge: String): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        addView(text(title, 18f, true), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        addView(prPill(badge))
+    }
+
+    private fun prPill(label: String): TextView = text(label, 11f, true, COLOR_PR).apply {
+        setPadding(dp(9), dp(4), dp(9), dp(4))
+        background = roundedBackground(COLOR_PR_SOFT, COLOR_PR_SOFT, 20)
+    }
+
+    private fun roundedBackground(fill: Int, stroke: Int, radiusDp: Int): GradientDrawable = GradientDrawable().apply {
+        setColor(fill)
+        cornerRadius = dp(radiusDp).toFloat()
+        if (stroke != fill) setStroke(dp(1), stroke)
     }
 
     private fun textInput(hintText: String, value: String): EditText = EditText(this).apply {
@@ -639,11 +991,9 @@ class MainActivity : Activity() {
 
     private fun inputBackground(input: EditText) {
         input.setPadding(dp(11), 0, dp(11), 0)
-        input.background = GradientDrawable().apply {
-            setColor(Color.rgb(250, 250, 250))
-            cornerRadius = dp(9).toFloat()
-            setStroke(dp(1), Color.rgb(205, 210, 214))
-        }
+        input.setTextColor(COLOR_TEXT)
+        input.setHintTextColor(COLOR_MUTED)
+        input.background = roundedBackground(Color.WHITE, COLOR_BORDER, 11)
     }
 
     private fun simpleWatcher(after: () -> Unit): TextWatcher = object : TextWatcher {
@@ -701,6 +1051,18 @@ class MainActivity : Activity() {
         else String.format(Locale.US, "%02d:%02d", minutes, seconds)
     }
 
+    private fun formatVolume(value: Double): String = when {
+        value >= 1_000_000 -> String.format(Locale.US, "%.1fm kg", value / 1_000_000.0)
+        value >= 10_000 -> String.format(Locale.US, "%.1fk kg", value / 1_000.0)
+        else -> "${formatRaw(value)} kg"
+    }
+
+    private fun formatCompactDuration(totalSeconds: Long): String {
+        val hours = totalSeconds / 3600
+        val minutes = (totalSeconds % 3600) / 60
+        return if (hours > 0) "${hours}h ${minutes}m" else "${minutes}m"
+    }
+
     private fun matchWithMargin(heightDp: Int, marginDp: Int): LinearLayout.LayoutParams =
         LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(heightDp)).apply {
             topMargin = dp(marginDp)
@@ -720,4 +1082,20 @@ class MainActivity : Activity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+
+    companion object {
+        private val COLOR_BACKGROUND = Color.rgb(246, 247, 251)
+        private val COLOR_SURFACE = Color.WHITE
+        private val COLOR_TEXT = Color.rgb(28, 31, 42)
+        private val COLOR_MUTED = Color.rgb(105, 111, 128)
+        private val COLOR_BORDER = Color.rgb(229, 231, 239)
+        private val COLOR_PRIMARY = Color.rgb(93, 79, 219)
+        private val COLOR_PRIMARY_SOFT = Color.rgb(238, 235, 255)
+        private val COLOR_TEAL_SOFT = Color.rgb(229, 249, 245)
+        private val COLOR_DANGER = Color.rgb(196, 67, 80)
+        private val COLOR_DANGER_SOFT = Color.rgb(255, 235, 237)
+        private val COLOR_PR = Color.rgb(174, 104, 0)
+        private val COLOR_PR_SOFT = Color.rgb(255, 243, 208)
+    }
+
 }

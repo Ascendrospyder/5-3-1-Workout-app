@@ -8,7 +8,7 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 
-class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null, 1) {
+class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null, 2) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("""
@@ -87,9 +87,34 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
         db.execSQL("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         db.execSQL("INSERT INTO settings(key, value) VALUES('week', '1')")
         db.execSQL("INSERT INTO settings(key, value) VALUES('cycle', '1')")
+        createScheduleTable(db)
+        seedWorkoutDays(db)
+        db.execSQL("INSERT OR IGNORE INTO settings(key, value) VALUES('reminder_times', '08:30,13:00,17:30,20:30')")
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            createScheduleTable(db)
+            seedWorkoutDays(db)
+            db.execSQL("INSERT OR IGNORE INTO settings(key, value) VALUES('reminder_times', '08:30,13:00,17:30,20:30')")
+        }
+    }
+
+    private fun createScheduleTable(db: SQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS workout_schedule (
+                day_of_week INTEGER PRIMARY KEY,
+                template_id INTEGER,
+                FOREIGN KEY(template_id) REFERENCES templates(id) ON DELETE SET NULL
+            )
+        """.trimIndent())
+    }
+
+    private fun seedWorkoutDays(db: SQLiteDatabase) {
+        listOf(3, 5, 6, 7).forEach { day ->
+            db.execSQL("INSERT OR IGNORE INTO workout_schedule(day_of_week, template_id) VALUES(?, NULL)", arrayOf(day))
+        }
+    }
 
     override fun onConfigure(db: SQLiteDatabase) {
         super.onConfigure(db)
@@ -108,6 +133,85 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
             put("value", value.toString())
         }
         writableDatabase.insertWithOnConflict("settings", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    fun getSettingString(key: String, fallback: String): String {
+        readableDatabase.rawQuery("SELECT value FROM settings WHERE key=?", arrayOf(key)).use { c ->
+            return if (c.moveToFirst()) c.getString(0) ?: fallback else fallback
+        }
+    }
+
+    fun setSettingString(key: String, value: String) {
+        val cv = ContentValues().apply {
+            put("key", key)
+            put("value", value)
+        }
+        writableDatabase.insertWithOnConflict("settings", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    fun getWorkoutSchedule(): List<ScheduledWorkoutDay> {
+        val result = mutableListOf<ScheduledWorkoutDay>()
+        val sql = """
+            SELECT s.day_of_week, s.template_id, t.name
+            FROM workout_schedule s
+            LEFT JOIN templates t ON t.id=s.template_id
+            WHERE s.day_of_week IN (3,5,6,7)
+            ORDER BY CASE s.day_of_week WHEN 3 THEN 1 WHEN 5 THEN 2 WHEN 6 THEN 3 WHEN 7 THEN 4 ELSE 5 END
+        """.trimIndent()
+        readableDatabase.rawQuery(sql, null).use { c ->
+            while (c.moveToNext()) {
+                result += ScheduledWorkoutDay(
+                    dayOfWeek = c.getInt(0),
+                    templateId = if (c.isNull(1)) null else c.getLong(1),
+                    templateName = if (c.isNull(2)) null else c.getString(2)
+                )
+            }
+        }
+        return result
+    }
+
+    fun setScheduledTemplate(dayOfWeek: Int, templateId: Long?) {
+        val cv = ContentValues().apply {
+            put("day_of_week", dayOfWeek)
+            if (templateId == null) putNull("template_id") else put("template_id", templateId)
+        }
+        writableDatabase.insertWithOnConflict("workout_schedule", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    fun getScheduledDay(dayOfWeek: Int): ScheduledWorkoutDay? {
+        val sql = """
+            SELECT s.day_of_week, s.template_id, t.name
+            FROM workout_schedule s LEFT JOIN templates t ON t.id=s.template_id
+            WHERE s.day_of_week=? LIMIT 1
+        """.trimIndent()
+        readableDatabase.rawQuery(sql, arrayOf(dayOfWeek.toString())).use { c ->
+            if (!c.moveToFirst()) return null
+            return ScheduledWorkoutDay(
+                c.getInt(0),
+                if (c.isNull(1)) null else c.getLong(1),
+                if (c.isNull(2)) null else c.getString(2)
+            )
+        }
+    }
+
+    fun hasCompletedTemplateBetween(templateId: Long, startMs: Long, endMs: Long): Boolean {
+        readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM workouts WHERE status=? AND template_id=? AND completed_at>=? AND completed_at<?",
+            arrayOf(WorkoutSummary.COMPLETED, templateId.toString(), startMs.toString(), endMs.toString())
+        ).use { c ->
+            c.moveToFirst()
+            return c.getInt(0) > 0
+        }
+    }
+
+    fun hasActiveWorkoutForTemplate(templateId: Long): Boolean {
+        readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM workouts WHERE status=? AND template_id=?",
+            arrayOf(WorkoutSummary.ACTIVE, templateId.toString())
+        ).use { c ->
+            c.moveToFirst()
+            return c.getInt(0) > 0
+        }
     }
 
     fun getExercises(): List<Exercise> {
@@ -134,6 +238,32 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
     }
 
     fun getExercise(id: Long): Exercise? = getExercises().firstOrNull { it.id == id }
+
+    fun findExerciseByName(name: String): Exercise? {
+        val sql = "SELECT * FROM exercises WHERE name = ? COLLATE NOCASE LIMIT 1"
+        readableDatabase.rawQuery(sql, arrayOf(name.trim())).use { c ->
+            if (!c.moveToFirst()) return null
+            return Exercise(
+                id = c.getLong(c.getColumnIndexOrThrow("id")),
+                name = c.getString(c.getColumnIndexOrThrow("name")),
+                mode = c.getString(c.getColumnIndexOrThrow("mode")),
+                oneRepMax = c.getDouble(c.getColumnIndexOrThrow("one_rep_max")),
+                tmPercent = c.getDouble(c.getColumnIndexOrThrow("tm_percent")),
+                trainingMax = c.getDouble(c.getColumnIndexOrThrow("training_max")),
+                roundTo = c.getDouble(c.getColumnIndexOrThrow("round_to")),
+                increment = c.getDouble(c.getColumnIndexOrThrow("increment")),
+                defaultWeight = c.getDouble(c.getColumnIndexOrThrow("default_weight")),
+                defaultSets = c.getInt(c.getColumnIndexOrThrow("default_sets")),
+                repMin = c.getInt(c.getColumnIndexOrThrow("rep_min")),
+                repMax = c.getInt(c.getColumnIndexOrThrow("rep_max"))
+            )
+        }
+    }
+
+    fun ensureExercise(exercise: Exercise): Long {
+        val existing = findExerciseByName(exercise.name)
+        return existing?.id ?: saveExercise(exercise)
+    }
 
     fun saveExercise(exercise: Exercise): Long {
         val cv = ContentValues().apply {
@@ -323,10 +453,18 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
     fun getWorkoutExercises(workoutId: Long): List<WorkoutExerciseRecord> {
         val result = mutableListOf<WorkoutExerciseRecord>()
         readableDatabase.rawQuery(
-            "SELECT id, exercise_name, mode, sort_order FROM workout_exercises WHERE workout_id=? ORDER BY sort_order, id",
+            "SELECT id, exercise_name, mode, sort_order, exercise_id FROM workout_exercises WHERE workout_id=? ORDER BY sort_order, id",
             arrayOf(workoutId.toString())
         ).use { c ->
-            while (c.moveToNext()) result += WorkoutExerciseRecord(c.getLong(0), c.getString(1), c.getString(2), c.getInt(3))
+            while (c.moveToNext()) {
+                result += WorkoutExerciseRecord(
+                    id = c.getLong(0),
+                    exerciseName = c.getString(1),
+                    mode = c.getString(2),
+                    sortOrder = c.getInt(3),
+                    exerciseId = if (c.isNull(4)) null else c.getLong(4)
+                )
+            }
         }
         return result
     }
@@ -412,6 +550,199 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
             }
         }
         return result
+    }
+
+
+    fun getWorkoutStats(workoutId: Long): WorkoutStats {
+        val summary = getWorkout(workoutId) ?: return WorkoutStats(0, 0, 0, 0, 0.0, 0.0, 0L)
+        var completedSets = 0
+        var totalSets = 0
+        var totalReps = 0
+        var totalVolume = 0.0
+        var topWeight = 0.0
+        val exercises = getWorkoutExercises(workoutId)
+        exercises.forEach { exercise ->
+            getWorkoutSets(exercise.id).forEach { set ->
+                totalSets++
+                if (set.completed) {
+                    completedSets++
+                    val reps = set.actualReps ?: 0
+                    totalReps += reps
+                    totalVolume += set.actualWeight * reps
+                    if (reps > 0 && set.actualWeight > topWeight) topWeight = set.actualWeight
+                }
+            }
+        }
+        val end = summary.completedAt ?: System.currentTimeMillis()
+        val duration = ((end - summary.startedAt) / 1000L).coerceAtLeast(0L)
+        val prCount = getWorkoutPrSetIds(workoutId).values.sumOf { it.size }
+        return WorkoutStats(exercises.size, completedSets, totalSets, totalReps, totalVolume, topWeight, duration, prCount)
+    }
+
+    fun getExerciseWorkoutStats(workoutId: Long): List<ExerciseWorkoutStats> =
+        getWorkoutExercises(workoutId).map { exercise ->
+            val sets = getWorkoutSets(exercise.id)
+            val completed = sets.filter { it.completed }
+            val reps = completed.sumOf { it.actualReps ?: 0 }
+            val volume = completed.sumOf { it.actualWeight * (it.actualReps ?: 0) }
+            val topWeight = completed.filter { (it.actualReps ?: 0) > 0 }.maxOfOrNull { it.actualWeight } ?: 0.0
+            val bestE1rm = completed.maxOfOrNull { ProgramMath.estimatedOneRepMax(it.actualWeight, it.actualReps ?: 0) } ?: 0.0
+            ExerciseWorkoutStats(exercise.id, exercise.exerciseName, completed.size, sets.size, reps, volume, topWeight, bestE1rm)
+        }
+
+    fun getHistoryOverview(): HistoryOverview {
+        var totalWorkouts = 0
+        var totalSets = 0
+        var totalReps = 0
+        var totalVolume = 0.0
+        var avgDuration = 0L
+        val sql = """
+            SELECT COUNT(DISTINCT w.id),
+                   COALESCE(SUM(CASE WHEN s.completed=1 THEN 1 ELSE 0 END),0),
+                   COALESCE(SUM(CASE WHEN s.completed=1 THEN COALESCE(s.actual_reps,0) ELSE 0 END),0),
+                   COALESCE(SUM(CASE WHEN s.completed=1 THEN s.actual_weight * COALESCE(s.actual_reps,0) ELSE 0 END),0),
+                   0
+            FROM workouts w
+            LEFT JOIN workout_exercises we ON we.workout_id=w.id
+            LEFT JOIN workout_sets s ON s.workout_exercise_id=we.id
+            WHERE w.status=?
+        """.trimIndent()
+        readableDatabase.rawQuery(sql, arrayOf(WorkoutSummary.COMPLETED)).use { c ->
+            if (c.moveToFirst()) {
+                totalWorkouts = c.getInt(0)
+                totalSets = c.getInt(1)
+                totalReps = c.getInt(2)
+                totalVolume = c.getDouble(3)
+                avgDuration = c.getDouble(4).toLong()
+            }
+        }
+        readableDatabase.rawQuery(
+            "SELECT COALESCE(AVG((completed_at - started_at) / 1000.0),0) FROM workouts WHERE status=? AND completed_at IS NOT NULL",
+            arrayOf(WorkoutSummary.COMPLETED)
+        ).use { c -> if (c.moveToFirst()) avgDuration = c.getDouble(0).toLong() }
+
+        val cutoff = System.currentTimeMillis() - 30L * 24L * 60L * 60L * 1000L
+        var recent = 0
+        readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM workouts WHERE status=? AND completed_at>=?",
+            arrayOf(WorkoutSummary.COMPLETED, cutoff.toString())
+        ).use { c -> if (c.moveToFirst()) recent = c.getInt(0) }
+        return HistoryOverview(totalWorkouts, recent, totalSets, totalReps, totalVolume, avgDuration)
+    }
+
+    fun getPersonalRecords(): List<ExercisePersonalRecords> {
+        data class Holder(
+            var exerciseId: Long?,
+            var name: String,
+            var heavyWeight: Double = 0.0,
+            var heavyReps: Int = 0,
+            var heavyAt: Long = 0L,
+            var e1rm: Double = 0.0,
+            var e1rmWeight: Double = 0.0,
+            var e1rmReps: Int = 0,
+            var e1rmAt: Long = 0L
+        )
+
+        val map = linkedMapOf<String, Holder>()
+        val sql = """
+            SELECT we.exercise_id, we.exercise_name, s.actual_weight, s.actual_reps, w.completed_at
+            FROM workouts w
+            JOIN workout_exercises we ON we.workout_id=w.id
+            JOIN workout_sets s ON s.workout_exercise_id=we.id
+            WHERE w.status=? AND s.completed=1 AND s.actual_reps IS NOT NULL AND s.actual_reps>0
+            ORDER BY w.completed_at ASC, w.id ASC, we.sort_order ASC, s.set_number ASC
+        """.trimIndent()
+        readableDatabase.rawQuery(sql, arrayOf(WorkoutSummary.COMPLETED)).use { c ->
+            while (c.moveToNext()) {
+                val exerciseId = if (c.isNull(0)) null else c.getLong(0)
+                val name = c.getString(1)
+                val weight = c.getDouble(2)
+                val reps = c.getInt(3)
+                val at = c.getLong(4)
+                val key = exerciseId?.let { "id:$it" } ?: "name:${name.lowercase()}"
+                val holder = map.getOrPut(key) { Holder(exerciseId, name) }
+                holder.name = name
+                val e1rm = ProgramMath.estimatedOneRepMax(weight, reps)
+                if (weight > holder.heavyWeight) {
+                    holder.heavyWeight = weight
+                    holder.heavyReps = reps
+                    holder.heavyAt = at
+                }
+                if (e1rm > holder.e1rm) {
+                    holder.e1rm = e1rm
+                    holder.e1rmWeight = weight
+                    holder.e1rmReps = reps
+                    holder.e1rmAt = at
+                }
+            }
+        }
+        return map.values.map { h ->
+            ExercisePersonalRecords(
+                h.exerciseId, h.name,
+                h.heavyWeight, h.heavyReps, h.heavyAt,
+                h.e1rm, h.e1rmWeight, h.e1rmReps, h.e1rmAt
+            )
+        }.sortedBy { it.exerciseName.lowercase() }
+    }
+
+    /**
+     * Returns set IDs mapped to PR badges earned in this workout. A PR is only
+     * awarded when the best completed set in this workout beats all completed
+     * workouts before it for the same exercise.
+     */
+    fun getWorkoutPrSetIds(workoutId: Long): Map<Long, Set<String>> {
+        val workout = getWorkout(workoutId) ?: return emptyMap()
+        if (workout.status != WorkoutSummary.COMPLETED || workout.completedAt == null) return emptyMap()
+        val result = linkedMapOf<Long, MutableSet<String>>()
+
+        getWorkoutExercises(workoutId).forEach { exercise ->
+            val currentSets = getWorkoutSets(exercise.id).filter { it.completed && (it.actualReps ?: 0) > 0 }
+            if (currentSets.isEmpty()) return@forEach
+            val previous = previousBests(exercise.exerciseId, exercise.exerciseName, workout.completedAt, workoutId)
+
+            val heavySet = currentSets.maxByOrNull { it.actualWeight }
+            if (heavySet != null && heavySet.actualWeight > previous.first + 0.0001) {
+                result.getOrPut(heavySet.id) { linkedSetOf() }.add("WEIGHT PR")
+            }
+
+            val e1rmSet = currentSets.maxByOrNull { ProgramMath.estimatedOneRepMax(it.actualWeight, it.actualReps ?: 0) }
+            if (e1rmSet != null) {
+                val currentE1rm = ProgramMath.estimatedOneRepMax(e1rmSet.actualWeight, e1rmSet.actualReps ?: 0)
+                if (currentE1rm > previous.second + 0.0001) {
+                    result.getOrPut(e1rmSet.id) { linkedSetOf() }.add("e1RM PR")
+                }
+            }
+        }
+        return result
+    }
+
+    private fun previousBests(exerciseId: Long?, exerciseName: String, completedAt: Long, workoutId: Long): Pair<Double, Double> {
+        var bestWeight = 0.0
+        var bestE1rm = 0.0
+        val identityClause = if (exerciseId != null) "we.exercise_id=?" else "LOWER(we.exercise_name)=LOWER(?)"
+        val identityValue = exerciseId?.toString() ?: exerciseName
+        val sql = """
+            SELECT s.actual_weight, s.actual_reps
+            FROM workouts w
+            JOIN workout_exercises we ON we.workout_id=w.id
+            JOIN workout_sets s ON s.workout_exercise_id=we.id
+            WHERE w.status=? AND s.completed=1 AND s.actual_reps IS NOT NULL AND s.actual_reps>0
+              AND (w.completed_at < ? OR (w.completed_at = ? AND w.id < ?))
+              AND $identityClause
+        """.trimIndent()
+        readableDatabase.rawQuery(
+            sql,
+            arrayOf(WorkoutSummary.COMPLETED, completedAt.toString(), completedAt.toString(), workoutId.toString(), identityValue)
+        ).use { c ->
+            while (c.moveToNext()) {
+                val weight = c.getDouble(0)
+                val reps = c.getInt(1)
+                if (weight > bestWeight) bestWeight = weight
+                val e1rm = ProgramMath.estimatedOneRepMax(weight, reps)
+                if (e1rm > bestE1rm) bestE1rm = e1rm
+            }
+        }
+        return bestWeight to bestE1rm
     }
 
     fun advanceFiveThreeOneWeek(): Pair<Int, Int> {

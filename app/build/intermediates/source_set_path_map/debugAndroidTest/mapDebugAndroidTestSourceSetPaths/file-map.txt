@@ -1,0 +1,4 @@
+com.example.fivethreeonelifter.test.app-androidTest-0 C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\build\generated\res\resValues\androidTest\debug
+com.example.fivethreeonelifter.test.app-mergeDebugAndroidTestResources-1 C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\build\intermediates\incremental\debugAndroidTest\mergeDebugAndroidTestResources\merged.dir
+com.example.fivethreeonelifter.test.app-mergeDebugAndroidTestResources-2 C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\build\intermediates\incremental\debugAndroidTest\mergeDebugAndroidTestResources\stripped.dir
+com.example.fivethreeonelifter.test.app-debugAndroidTest-3 C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\build\intermediates\merged_res\debugAndroidTest\mergeDebugAndroidTestResources

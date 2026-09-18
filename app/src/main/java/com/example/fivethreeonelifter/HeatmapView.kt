@@ -19,7 +19,7 @@ class HeatmapView(context: Context) : View(context) {
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(90, 96, 101)
+        color = Color.rgb(105, 111, 128)
         textSize = 11f * resources.displayMetrics.scaledDensity
     }
 
@@ -54,14 +54,14 @@ class HeatmapView(context: Context) : View(context) {
                 val count = if (date.isAfter(today)) 0 else (counts[date] ?: 0)
                 paint.color = when {
                     date.isAfter(today) -> Color.TRANSPARENT
-                    count <= 0 -> Color.rgb(231, 234, 236)
-                    count == 1 -> Color.rgb(161, 204, 174)
-                    count == 2 -> Color.rgb(86, 166, 111)
-                    else -> Color.rgb(38, 116, 68)
+                    count <= 0 -> Color.rgb(232, 233, 241)
+                    count == 1 -> Color.rgb(206, 198, 255)
+                    count == 2 -> Color.rgb(139, 123, 238)
+                    else -> Color.rgb(93, 79, 219)
                 }
                 val x = left + week * (cell + gap)
                 val y = top + day * (cell + gap)
-                canvas.drawRoundRect(x, y, x + cell, y + cell, 3f * density, 3f * density, paint)
+                canvas.drawRoundRect(x, y, x + cell, y + cell, 4f * density, 4f * density, paint)
             }
         }
     }

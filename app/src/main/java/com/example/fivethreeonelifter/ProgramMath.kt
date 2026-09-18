@@ -33,6 +33,12 @@ object ProgramMath {
     fun workingWeight(trainingMax: Double, percentage: Double, increment: Double): Double =
         roundToIncrement(trainingMax * percentage, increment)
 
+    fun estimatedOneRepMax(weight: Double, reps: Int): Double {
+        if (weight <= 0.0 || reps <= 0) return 0.0
+        if (reps == 1) return weight
+        return weight * (1.0 + reps / 30.0)
+    }
+
     fun roundToIncrement(value: Double, increment: Double): Double {
         if (increment <= 0.0) return value
         return round(value / increment) * increment

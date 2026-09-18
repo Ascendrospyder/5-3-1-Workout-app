@@ -1,8 +1,8 @@
-# LiftLog — flexible 5/3/1 workout tracker
+# LiftLog 2.4 — scheduled workout reminders
 
-A small native Android/Kotlin lifting app with reusable workout templates, a custom exercise library, live workout logging, timers, history, and a 12-week training heatmap.
+A small native Android/Kotlin lifting app with reusable workout templates, a custom exercise library, live workout logging, timers, detailed history analytics, personal-record tracking, a 12-week training heatmap, and schedule-aware workout notifications.
 
-The app does **not** hardcode OHP, bench, squat, rows, or accessories. You create the exercises you want and decide whether each exercise uses 5/3/1 calculations or a manual prescription.
+The app keeps exercises configurable, but now includes a built-in catalogue of popular Chest, Back, Legs, Arms and Shoulders exercises for one-tap template building. You can still create any custom exercise you want and decide whether it uses 5/3/1 calculations or a manual prescription.
 
 ## What this version does
 
@@ -14,6 +14,20 @@ Create any exercise you want. Each exercise has one of two modes:
 - **Manual** — stores a default weight, number of sets, and rep range. Good for rows, curls, triceps, lateral raises, RDLs, etc.
 
 For a 5/3/1 exercise you can enter a 1RM and Training Max percentage and press **Use 1RM × Training Max %** to calculate the starting Training Max. You can also directly edit the current Training Max.
+
+
+### Popular exercise presets
+
+While editing a workout template, LiftLog shows a built-in quick-add catalogue grouped into **Chest, Back, Legs, Arms and Shoulders**. It includes common movements such as bench press, incline presses, chest-supported rows, pulldowns, squats, leg press, RDLs, curls, triceps extensions, overhead press and lateral raises.
+
+Tapping a preset does two things automatically:
+
+1. adds the exercise to your personal exercise library if it is not already there, and
+2. adds it to the workout template you are currently editing.
+
+If you already have an exercise with the same name, LiftLog reuses your existing customised version rather than overwriting its weights, 5/3/1 settings, sets or reps. Presets start in manual mode with sensible set/rep ranges and a 0 kg default weight so you can enter the load that fits you. You can edit any preset later and switch it to 5/3/1 if desired.
+
+There is also a **Create custom exercise for this template** action. Saving a custom exercise from there automatically adds it to that template.
 
 ### Reusable workout templates
 
@@ -43,7 +57,16 @@ During a workout the app gives you:
 
 The current workout is stored in SQLite, so its sets are not just temporary UI state.
 
-### Workout history
+### Workout history + PR tracking
+
+The History screen now summarizes total workouts, workouts in the last 30 days, completed sets, total reps, training volume, and average session duration. Each workout also shows its own volume, reps, sets, duration, top load and exercise-level stats.
+
+Personal records are calculated automatically from completed sets where actual reps were logged:
+
+- **Weight PR** — the heaviest completed load recorded for that exercise at that point in your history.
+- **Estimated 1RM PR** — the best estimated one-rep max from weight × reps using the Epley estimate (a logged single is treated as its actual weight).
+
+PR badges are historical: an old workout still shows the PR it earned on that date even after a later workout beats it. The History screen also shows your current heaviest-load and estimated-1RM records for each exercise.
 
 Completing a workout saves a dated snapshot containing:
 
@@ -62,6 +85,25 @@ Editing or deleting an exercise later does not rewrite old completed workout log
 
 Discarding a workout deletes the active session instead of adding it to history.
 
+### UI and navigation
+
+The app uses a cleaner, colourful card style with indigo, teal and warm PR accents. The main navigation is a fixed **bottom dock** for Home, Exercises, Templates and History, so it no longer scrolls at the top of each page.
+
+### Workout schedule + notifications
+
+LiftLog now has a schedule specifically for **Wednesday, Friday, Saturday and Sunday**. Open **Home > Manage schedule & reminders** and assign one of your workout templates to each training day. The app uses the template assigned to that weekday in the notification text, so reminders say what workout is actually planned rather than only saying that it is a training day.
+
+By default, each assigned training day has four reminder times:
+
+- 08:30
+- 13:00
+- 17:30
+- 20:30
+
+All four times are editable in 24-hour `HH:mm` format. Reminders are scheduled in the phone's local timezone. If the assigned workout is completed that day, later reminders are suppressed automatically. Discarding a workout does not mark the day complete, so a later reminder can still appear. If a scheduled workout is already active, the notification changes to a resume reminder.
+
+The reminders use Android's normal inexact alarm path, so they do not require the special exact-alarm permission and Android may shift delivery slightly during battery-saving modes. Android 13+ requires the normal notification permission; LiftLog asks for it when you save the schedule. Reminder scheduling is restored after device reboot or app replacement/update.
+
 ### Dashboard
 
 The dashboard contains:
@@ -70,7 +112,7 @@ The dashboard contains:
 - current 5/3/1 cycle and week
 - buttons to start each workout template
 - a small **12-week heatmap** based on completed workout dates
-- recent workout summaries
+- recent workout summaries with volume, reps, completed-set counts and PR badges
 
 ### 5/3/1 calculations
 
@@ -88,10 +130,13 @@ When you finish Week 4 and press **Finish deload + progress Training Maxes**, th
 ## Project structure
 
 - `MainActivity.kt` — screens and workout UI
-- `WorkoutDb.kt` — SQLite persistence for exercises, templates, workouts and sets
+- `WorkoutDb.kt` — SQLite persistence for exercises, templates, workout schedule, workouts and sets
 - `Models.kt` — data models
 - `ProgramMath.kt` — 5/3/1 and weight-rounding calculations
 - `HeatmapView.kt` — custom 12-week dashboard heatmap
+- `NotificationScheduler.kt` — schedules the next reminder occurrences
+- `WorkoutReminderReceiver.kt` — checks the day/template state and posts reminders
+- `BootReceiver.kt` — restores reminders after reboot/update
 - `ProgramMathTest.kt` — calculation unit tests
 
 The project deliberately uses Android's built-in UI widgets and SQLite APIs, so there are very few runtime dependencies.
@@ -143,7 +188,9 @@ Copy that APK to the phone, open it, allow installs from that source when Androi
 4. Add OHP as 5/3/1 with a 2.5 kg cycle increment.
 5. Add chest-supported row, curls, triceps, RDLs, etc. as manual exercises.
 6. Open **Templates** and build your training days from those exercises.
-7. Return to **Home** and start the workout from its template.
+7. Return to **Home**, open **Manage schedule & reminders**, assign your Wednesday/Friday/Saturday/Sunday templates, and save the reminder times.
+8. Allow notifications when Android prompts you.
+9. Start workouts from Home as normal.
 
 ## Build-validation note
 
@@ -151,6 +198,6 @@ The pure Kotlin calculation/model code was syntax-checked in the generation envi
 
 ## If you previously opened the Gradle 9.6 build
 
-Use this fixed project from a **new unzipped folder** rather than copying it over the old folder. This avoids stale `.gradle` / `.idea` model state from the earlier Gradle 9.6 project. In Android Studio, set **Settings > Build, Execution, Deployment > Build Tools > Gradle > Gradle JDK** to the Embedded JDK / JDK 17 or newer, then run **File > Sync Project with Gradle Files**.
+Use this fixed project from a **new unzipped folder** rather than copying it over the old folder. This avoids stale `.gradle` / `.idea` model state from the earlier Gradle 9.6 project. In Android Studio, set **Settings > Build, Execution, Deployment > Build Tools > Gradle > Gradle JDK** to **JDK 17 or JDK 21** (do not use JDK 25 with Gradle 8.9), then run **File > Sync Project with Gradle Files**.
 
 If Android Studio still shows the old `DefaultDecoratedConvention` import error, close the project, delete only the project-local `.gradle` and `.idea` folders, reopen the project, and sync again.

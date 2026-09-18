@@ -46,7 +46,8 @@ data class WorkoutExerciseRecord(
     val id: Long,
     val exerciseName: String,
     val mode: String,
-    val sortOrder: Int
+    val sortOrder: Int,
+    val exerciseId: Long? = null
 )
 
 data class WorkoutSetRecord(
@@ -60,3 +61,53 @@ data class WorkoutSetRecord(
     val actualReps: Int?,
     val completed: Boolean
 )
+
+data class WorkoutStats(
+    val exerciseCount: Int,
+    val completedSets: Int,
+    val totalSets: Int,
+    val totalReps: Int,
+    val totalVolume: Double,
+    val topWeight: Double,
+    val durationSeconds: Long,
+    val prCount: Int = 0
+)
+
+data class ExerciseWorkoutStats(
+    val workoutExerciseId: Long,
+    val exerciseName: String,
+    val completedSets: Int,
+    val totalSets: Int,
+    val totalReps: Int,
+    val volume: Double,
+    val topWeight: Double,
+    val estimatedOneRepMax: Double
+)
+
+data class HistoryOverview(
+    val totalWorkouts: Int,
+    val workoutsLast30Days: Int,
+    val totalCompletedSets: Int,
+    val totalReps: Int,
+    val totalVolume: Double,
+    val averageDurationSeconds: Long
+)
+
+data class ExercisePersonalRecords(
+    val exerciseId: Long?,
+    val exerciseName: String,
+    val heaviestWeight: Double,
+    val heaviestWeightReps: Int,
+    val heaviestAt: Long,
+    val estimatedOneRepMax: Double,
+    val e1rmWeight: Double,
+    val e1rmReps: Int,
+    val e1rmAt: Long
+)
+
+data class ScheduledWorkoutDay(
+    val dayOfWeek: Int,
+    val templateId: Long?,
+    val templateName: String?
+)
+
