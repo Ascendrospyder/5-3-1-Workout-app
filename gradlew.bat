@@ -2,20 +2,13 @@
 setlocal
 set "APP_HOME=%~dp0"
 set "JAR=%APP_HOME%gradle\wrapper\gradle-wrapper.jar"
-set "RAW_URL=https://raw.githubusercontent.com/gradle/gradle/v9.6.0/gradle/wrapper/gradle-wrapper.jar"
-set "EXPECTED_SHA=497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7"
+set "JAR_URL=https://services.gradle.org/distributions/gradle-8.9-wrapper.jar"
+set "SHA_URL=https://services.gradle.org/distributions/gradle-8.9-wrapper.jar.sha256"
 
 if not exist "%JAR%" (
-  echo Gradle wrapper JAR is not bundled; downloading the official Gradle 9.6.0 wrapper...
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -Uri '%RAW_URL%' -OutFile '%JAR%'"
+  echo Gradle wrapper JAR is not bundled; downloading the official Gradle 8.9 wrapper...
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -Uri '%JAR_URL%' -OutFile '%JAR%'; $expected=(Invoke-RestMethod -Uri '%SHA_URL%').Trim().ToLower(); $actual=(Get-FileHash -Algorithm SHA256 '%JAR%').Hash.ToLower(); if ($actual -ne $expected) { Remove-Item -Force '%JAR%'; throw 'Gradle wrapper checksum mismatch.' }"
   if errorlevel 1 exit /b 1
-)
-
-for /f "tokens=*" %%H in ('powershell -NoProfile -Command "(Get-FileHash -Algorithm SHA256 '%JAR%').Hash.ToLower()"') do set "ACTUAL_SHA=%%H"
-if /I not "%ACTUAL_SHA%"=="%EXPECTED_SHA%" (
-  echo Gradle wrapper checksum mismatch.
-  del /q "%JAR%" 2>nul
-  exit /b 1
 )
 
 if defined JAVA_HOME (

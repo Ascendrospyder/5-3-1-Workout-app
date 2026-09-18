@@ -98,9 +98,10 @@ The project deliberately uses Android's built-in UI widgets and SQLite APIs, so 
 
 ## Toolchain
 
-- Android Gradle Plugin 9.4.0
-- Gradle 9.6.0
-- compileSdk / targetSdk 37
+- Android Gradle Plugin 8.7.2
+- Gradle 8.9
+- Kotlin Android plugin 2.1.20
+- compileSdk / targetSdk 35
 - minSdk 26
 - Java 17 bytecode target
 
@@ -110,9 +111,9 @@ The project deliberately uses Android's built-in UI widgets and SQLite APIs, so 
 2. Unzip the downloaded project.
 3. Open the folder containing `settings.gradle.kts` in Android Studio.
 4. Let Gradle Sync run.
-5. If Android Studio asks to install Android SDK Platform 37 or build tools, accept it.
+5. If Android Studio asks to install Android SDK Platform 35 or build tools, accept it.
 
-The supplied wrapper bootstrap script downloads the Gradle wrapper JAR the first time it is used. Your computer therefore needs internet access for the initial Gradle/Android dependency setup.
+The supplied wrapper bootstrap script downloads the official Gradle 8.9 wrapper JAR the first time it is used and verifies it against Gradle's published SHA-256 checksum. Your computer therefore needs internet access for the initial Gradle/Android dependency setup.
 
 ## Install directly on your Android phone
 
@@ -146,4 +147,10 @@ Copy that APK to the phone, open it, allow installs from that source when Androi
 
 ## Build-validation note
 
-The pure Kotlin calculation code was syntax-checked in the generation environment. A full Android Gradle build could not be run there because the environment has no Android SDK and cannot download the missing Gradle wrapper JAR. Android Studio on a normal connected development machine performs that final Android build/sync step.
+The pure Kotlin calculation/model code was syntax-checked in the generation environment. A full Android Gradle build could not be run there because the environment has no Android SDK or external dependency access. Android Studio on a normal connected development machine performs that final Android build/sync step.
+
+## If you previously opened the Gradle 9.6 build
+
+Use this fixed project from a **new unzipped folder** rather than copying it over the old folder. This avoids stale `.gradle` / `.idea` model state from the earlier Gradle 9.6 project. In Android Studio, set **Settings > Build, Execution, Deployment > Build Tools > Gradle > Gradle JDK** to the Embedded JDK / JDK 17 or newer, then run **File > Sync Project with Gradle Files**.
+
+If Android Studio still shows the old `DefaultDecoratedConvention` import error, close the project, delete only the project-local `.gradle` and `.idea` folders, reopen the project, and sync again.
