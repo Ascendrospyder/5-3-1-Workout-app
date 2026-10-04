@@ -1,1 +1,3 @@
 int style Theme_FiveThreeOne 0x7f010000
+int style Theme_FiveThreeOne_Dark 0x7f010001
+int style Theme_FiveThreeOne_Light 0x7f010002

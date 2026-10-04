@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.fivethreeonelifter"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "2.4"
+        versionCode = 12
+        versionName = "3.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

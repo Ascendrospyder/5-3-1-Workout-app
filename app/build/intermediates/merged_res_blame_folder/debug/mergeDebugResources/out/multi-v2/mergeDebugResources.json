@@ -6,6 +6,52 @@
                 {
                     "source": "C:\\Users\\arjun\\Desktop\\projects\\5-3-1-Workout-app\\app\\src\\main\\res\\values\\styles.xml",
                     "from": {
+                        "startLines": "-1,21,-1",
+                        "startColumns": "-1,4,-1",
+                        "startOffsets": "-1,1177,-1",
+                        "endLines": "-1,30,-1",
+                        "endColumns": "-1,12,-1",
+                        "endOffsets": "-1,1764,-1"
+                    },
+                    "to": {
+                        "startLines": "2,11,21",
+                        "startColumns": "4,4,4",
+                        "startOffsets": "55,580,1172",
+                        "endLines": "10,20,30",
+                        "endColumns": "12,12,12",
+                        "endOffsets": "575,1167,1764"
+                    }
+                }
+            ]
+        },
+        {
+            "outputFile": "C:\\Users\\arjun\\.gradle\\daemon\\8.9\\com.example.fivethreeonelifter.app-debug-4:\\values-night-v8_values-night-v8.arsc.flat",
+            "map": [
+                {
+                    "source": "C:\\Users\\arjun\\Desktop\\projects\\5-3-1-Workout-app\\app\\src\\main\\res\\values-night\\styles.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endColumns": "72",
+                        "endOffsets": "123"
+                    },
+                    "to": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endColumns": "71",
+                        "endOffsets": "122"
+                    }
+                }
+            ]
+        },
+        {
+            "outputFile": "C:\\Users\\arjun\\.gradle\\daemon\\8.9\\com.example.fivethreeonelifter.app-debug-4:\\values_values.arsc.flat",
+            "map": [
+                {
+                    "source": "C:\\Users\\arjun\\Desktop\\projects\\5-3-1-Workout-app\\app\\src\\main\\res\\values\\styles.xml",
+                    "from": {
                         "startLines": "2",
                         "startColumns": "4",
                         "startOffsets": "55",

@@ -1,3 +1,5 @@
 R_DEF: Internal format may change without notice
 local
 style Theme.FiveThreeOne
+style Theme.FiveThreeOne.Dark
+style Theme.FiveThreeOne.Light

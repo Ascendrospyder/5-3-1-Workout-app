@@ -1,10 +1,48 @@
-# LiftLog 2.4 — scheduled workout reminders
+# LiftLog 3.1 — dark mode
 
 A small native Android/Kotlin lifting app with reusable workout templates, a custom exercise library, live workout logging, timers, detailed history analytics, personal-record tracking, a 12-week training heatmap, and schedule-aware workout notifications.
 
 The app keeps exercises configurable, but now includes a built-in catalogue of popular Chest, Back, Legs, Arms and Shoulders exercises for one-tap template building. You can still create any custom exercise you want and decide whether it uses 5/3/1 calculations or a manual prescription.
 
 ## What this version does
+
+### Appearance
+
+Use **Home > Appearance > Theme** to choose **Follow phone setting**, **Light** or **Dark**. The default follows the phone's system theme. The saved choice applies to every page, including dialogs, inputs, navigation, progress charts and the heatmap, and is included in data exports. Changing it does not alter an active workout or its logged data.
+
+### Export all data
+
+On Home, scroll to **Your data > Export all data**. Choose where to save the timestamped `.json` file using Android's file picker. You can use local storage or a cloud drive if its app is installed and available in the picker. No broad storage permission is needed.
+
+The export contains every row and column from all app tables: exercises, templates, template membership, completed and active workouts, workout exercises and sets, settings (including 5/3/1 week/cycle), and workout schedules/reminder configuration. IDs, relationships, null values and numeric values are preserved. Personal records and analytics can be recalculated from the exported workout data. A database transaction keeps the snapshot consistent, and the export runs in the background.
+
+The JSON is an unencrypted portable data export. Store it somewhere private. There is no automatic cloud sync; saving an export does not connect LiftLog to a hosted database.
+
+### Restore and recover deleted items
+
+Use **Home > Your data > Restore from export** to select a LiftLog JSON export. After confirmation, the file is checked and the data is replaced in one database transaction. Unsupported files, bad references, duplicate IDs and invalid values cause rollback. Exports from database versions 2 and 3 are accepted, including exports from LiftLog 2.6. Restoring is replacement, not merging.
+
+Before replacing data, LiftLog saves a private local JSON copy. **Undo last restore** restores the most recent copy; **Export pre-restore copy** saves it outside the app. These local copies are deleted if the app is uninstalled, so export them if needed. Restoring cancels a running rest timer and reschedules workout reminders.
+
+Deleting an exercise or template offers **Undo** and moves it into **Recently deleted** instead of erasing it. Discarded workouts are also recoverable when no other workout is active. Template memberships are retained, and deleted templates do not trigger scheduled reminders.
+
+### Edit an active or saved workout
+
+During training, use **Edit workout / add exercises** to rename the session, add library/preset/custom exercises, remove exercises or change their order. **Edit sets** lets you change targets, weights, reps and completion marks, and add/remove sets. Save the set editor to apply its changes; leaving without saving asks for confirmation. Inline logging still saves as you train. Each set displays the matching set from the previous completed session.
+
+After completing, choose **Update template** or **Keep template**. Updating saves this session's exercise list, order, and manual per-set defaults to its originating template. It does not edit other templates or global exercise defaults. If the originating template is unavailable, a new template is created. 5/3/1 still generates its three programmed sets from the week and Training Max; additional manually added sets are retained. Future manual sessions still carry forward logged values from the last completed session.
+
+History summaries include **Edit this workout**, so you can correct entries after finishing. Statistics and PRs are derived from the saved entries and reflect corrections. Incomplete workouts require confirmation before being marked complete.
+
+### Progress charts
+
+Choose **View progress** from an exercise or a personal-record card. Switch between highest session weight, highest session reps and best estimated 1RM; tap points for their values. The most recent 100 sessions are charted with a readable session list below.
+
+### Rest alerts
+
+Rest timers offer 60/90/120-second presets, a custom duration, ±30-second adjustments, sound and vibration switches, and a notification linking back to the active workout. Deadlines survive navigation, backgrounding and process recreation. Foreground UI polling stops when the app is hidden. Rebooting, discarding/completing a workout or restoring data cancels its rest timer.
+
+On Android 12+, enable **precise rest alerts** in the timer card for exact background alarms. Without this permission Android may delay background delivery. Notifications must also be allowed; Android notification-channel settings can override the in-app sound/vibration preferences.
 
 ### Exercise library
 
@@ -14,6 +52,14 @@ Create any exercise you want. Each exercise has one of two modes:
 - **Manual** — stores a default weight, number of sets, and rep range. Good for rows, curls, triceps, lateral raises, RDLs, etc.
 
 For a 5/3/1 exercise you can enter a 1RM and Training Max percentage and press **Use 1RM × Training Max %** to calculate the starting Training Max. You can also directly edit the current Training Max.
+
+### Remembering the last workout
+
+New workouts prefill each manual exercise's set weights and reps from its most recent completed session, including when the same exercise is used in another template. Only sets marked Done are carried forward; skipped sets and newly added sets use the exercise defaults. Every new set starts unticked, and existing workout history is preserved.
+
+5/3/1 exercises also retain logged values when the prescribed reps, percentages and calculated weights match the previous session. Advancing the week or changing the calculated loads uses the new 5/3/1 prescription instead.
+
+To update an existing installation without losing data, install the new APK over the current app using the same application ID and signing key, with an equal or higher version code. Keep the existing debug keystore when building debug APKs. Do not uninstall the app or clear its storage to update it. This version upgrades to database version 3 using additive migrations; existing workout history is preserved.
 
 
 ### Popular exercise presets

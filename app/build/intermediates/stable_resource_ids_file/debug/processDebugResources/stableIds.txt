@@ -1,1 +1,3 @@
+com.example.fivethreeonelifter:style/Theme.FiveThreeOne.Light = 0x7f010002
+com.example.fivethreeonelifter:style/Theme.FiveThreeOne.Dark = 0x7f010001
 com.example.fivethreeonelifter:style/Theme.FiveThreeOne = 0x7f010000

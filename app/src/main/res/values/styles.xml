@@ -9,4 +9,24 @@
         <item name="android:colorAccent">#5D4FDB</item>
         <item name="android:windowBackground">#F6F7FB</item>
     </style>
+    <style name="Theme.FiveThreeOne.Light" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:navigationBarColor">#FFFFFF</item>
+        <item name="android:statusBarColor">#F6F7FB</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:colorAccent">#5D4FDB</item>
+        <item name="android:windowBackground">#F6F7FB</item>
+    </style>
+    <style name="Theme.FiveThreeOne.Dark" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:navigationBarColor">#1C2231</item>
+        <item name="android:statusBarColor">#111622</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:colorAccent">#FF69B4</item>
+        <item name="android:windowBackground">#111622</item>
+    </style>
 </resources>

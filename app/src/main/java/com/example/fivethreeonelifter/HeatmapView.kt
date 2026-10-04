@@ -10,7 +10,7 @@ import java.time.LocalDate
 import java.time.temporal.TemporalAdjusters
 import kotlin.math.min
 
-class HeatmapView(context: Context) : View(context) {
+class HeatmapView(context: Context, private val palette: AppPalette = AppPalette.LIGHT) : View(context) {
     var counts: Map<LocalDate, Int> = emptyMap()
         set(value) {
             field = value
@@ -19,7 +19,7 @@ class HeatmapView(context: Context) : View(context) {
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(105, 111, 128)
+        color = palette.muted
         textSize = 11f * resources.displayMetrics.scaledDensity
     }
 
@@ -54,10 +54,10 @@ class HeatmapView(context: Context) : View(context) {
                 val count = if (date.isAfter(today)) 0 else (counts[date] ?: 0)
                 paint.color = when {
                     date.isAfter(today) -> Color.TRANSPARENT
-                    count <= 0 -> Color.rgb(232, 233, 241)
-                    count == 1 -> Color.rgb(206, 198, 255)
-                    count == 2 -> Color.rgb(139, 123, 238)
-                    else -> Color.rgb(93, 79, 219)
+                    count <= 0 -> palette.heatmapEmpty
+                    count == 1 -> palette.heatmapLow
+                    count == 2 -> palette.heatmapMedium
+                    else -> palette.primary
                 }
                 val x = left + week * (cell + gap)
                 val y = top + day * (cell + gap)

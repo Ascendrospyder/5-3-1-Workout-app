@@ -111,3 +111,10 @@ data class ScheduledWorkoutDay(
     val templateName: String?
 )
 
+data class ExerciseProgressPoint(
+    val workoutId: Long,
+    val at: Long,
+    val weight: Double,
+    val reps: Int,
+    val estimatedOneRepMax: Double
+)

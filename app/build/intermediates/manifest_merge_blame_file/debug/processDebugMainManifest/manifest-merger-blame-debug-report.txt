@@ -1,8 +1,8 @@
 1<?xml version="1.0" encoding="utf-8"?>
 2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
 3    package="com.example.fivethreeonelifter"
-4    android:versionCode="6"
-5    android:versionName="2.4" >
+4    android:versionCode="12"
+5    android:versionName="3.2" >
 6
 7    <uses-sdk
 8        android:minSdkVersion="26"
@@ -14,61 +14,75 @@
 12    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 12-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:4:5-81
 12-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:4:22-78
-13
-14    <application
-14-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:5:5-31:19
-15        android:allowBackup="true"
-15-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:6:9-35
-16        android:debuggable="true"
-17        android:extractNativeLibs="false"
-18        android:label="LiftLog"
-18-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:7:9-32
-19        android:supportsRtl="true"
-19-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:8:9-35
-20        android:theme="@style/Theme.FiveThreeOne" >
-20-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:9:9-50
-21        <receiver
-21-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:10:9-12:40
-22            android:name="com.example.fivethreeonelifter.WorkoutReminderReceiver"
-22-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:11:13-52
-23            android:exported="false" />
-23-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:12:13-37
+13    <uses-permission android:name="android.permission.VIBRATE" />
+13-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:5:5-66
+13-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:5:22-63
+14    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+14-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:6:5-79
+14-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:6:22-76
+15
+16    <application
+16-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:7:5-35:19
+17        android:allowBackup="true"
+17-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:8:9-35
+18        android:debuggable="true"
+19        android:enableOnBackInvokedCallback="false"
+19-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:11:9-52
+20        android:extractNativeLibs="false"
+21        android:label="LiftLog"
+21-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:9:9-32
+22        android:supportsRtl="true"
+22-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:10:9-35
+23        android:theme="@style/Theme.FiveThreeOne" >
+23-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:12:9-50
 24        <receiver
-24-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:13:9-21:20
-25            android:name="com.example.fivethreeonelifter.BootReceiver"
-25-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:14:13-41
-26            android:enabled="true"
-26-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:15:13-35
-27            android:exported="false" >
-27-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:16:13-37
-28            <intent-filter>
-28-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:17:13-20:29
-29                <action android:name="android.intent.action.BOOT_COMPLETED" />
-29-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:18:17-79
-29-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:18:25-76
-30                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-30-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:19:17-84
-30-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:19:25-81
-31            </intent-filter>
-32        </receiver>
-33
-34        <activity
-34-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:23:9-30:20
-35            android:name="com.example.fivethreeonelifter.MainActivity"
-35-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:24:13-41
-36            android:exported="true" >
-36-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:25:13-36
-37            <intent-filter>
-37-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:26:13-29:29
-38                <action android:name="android.intent.action.MAIN" />
-38-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:27:17-69
-38-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:27:25-66
+24-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:13:9-80
+25            android:name="com.example.fivethreeonelifter.RestTimerReceiver"
+25-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:13:19-52
+26            android:exported="false" />
+26-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:13:53-77
+27        <receiver
+27-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:14:9-16:40
+28            android:name="com.example.fivethreeonelifter.WorkoutReminderReceiver"
+28-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:15:13-52
+29            android:exported="false" />
+29-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:16:13-37
+30        <receiver
+30-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:17:9-25:20
+31            android:name="com.example.fivethreeonelifter.BootReceiver"
+31-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:18:13-41
+32            android:enabled="true"
+32-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:19:13-35
+33            android:exported="false" >
+33-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:20:13-37
+34            <intent-filter>
+34-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:21:13-24:29
+35                <action android:name="android.intent.action.BOOT_COMPLETED" />
+35-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:22:17-79
+35-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:22:25-76
+36                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+36-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:23:17-84
+36-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:23:25-81
+37            </intent-filter>
+38        </receiver>
 39
-40                <category android:name="android.intent.category.LAUNCHER" />
-40-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:28:17-77
-40-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:28:27-74
-41            </intent-filter>
-42        </activity>
-43    </application>
-44
-45</manifest>
+40        <activity
+40-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:27:9-34:20
+41            android:name="com.example.fivethreeonelifter.MainActivity"
+41-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:28:13-41
+42            android:exported="true" >
+42-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:29:13-36
+43            <intent-filter>
+43-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:30:13-33:29
+44                <action android:name="android.intent.action.MAIN" />
+44-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:31:17-69
+44-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:31:25-66
+45
+46                <category android:name="android.intent.category.LAUNCHER" />
+46-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:32:17-77
+46-->C:\Users\arjun\Desktop\projects\5-3-1-Workout-app\app\src\main\AndroidManifest.xml:32:27-74
+47            </intent-filter>
+48        </activity>
+49    </application>
+50
+51</manifest>

@@ -2,13 +2,20 @@ package com.example.fivethreeonelifter
 
 import android.content.ContentValues
 import android.content.Context
+import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import android.util.Base64
+import android.util.JsonWriter
+import java.io.Writer
+import java.io.Reader
+import java.io.File
+import org.json.JSONObject
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 
-class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null, 2) {
+class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null, 3) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("""
@@ -90,6 +97,7 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
         createScheduleTable(db)
         seedWorkoutDays(db)
         db.execSQL("INSERT OR IGNORE INTO settings(key, value) VALUES('reminder_times', '08:30,13:00,17:30,20:30')")
+        addEditingSchema(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -98,6 +106,25 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
             seedWorkoutDays(db)
             db.execSQL("INSERT OR IGNORE INTO settings(key, value) VALUES('reminder_times', '08:30,13:00,17:30,20:30')")
         }
+        if (oldVersion < 3) addEditingSchema(db)
+    }
+
+    private fun addEditingSchema(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE exercises ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE templates ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE workouts ADD COLUMN workout_week INTEGER")
+        db.execSQL("ALTER TABLE workout_exercises ADD COLUMN removed INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("""
+            CREATE TABLE template_sets (
+                template_id INTEGER NOT NULL REFERENCES templates(id) ON DELETE CASCADE,
+                exercise_id INTEGER NOT NULL REFERENCES exercises(id) ON DELETE CASCADE,
+                set_number INTEGER NOT NULL,
+                target_reps TEXT NOT NULL,
+                planned_weight REAL NOT NULL,
+                actual_reps INTEGER,
+                PRIMARY KEY(template_id, exercise_id, set_number)
+            )
+        """.trimIndent())
     }
 
     private fun createScheduleTable(db: SQLiteDatabase) {
@@ -119,6 +146,146 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
     override fun onConfigure(db: SQLiteDatabase) {
         super.onConfigure(db)
         db.setForeignKeyConstraintsEnabled(true)
+    }
+
+    /** Export a consistent snapshot, including active workouts and all saved settings. */
+    fun writeExport(output: Writer) {
+        val database = readableDatabase
+        database.beginTransactionNonExclusive()
+        try {
+            val tables = mutableListOf<String>()
+            database.rawQuery(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name",
+                null
+            ).use { cursor ->
+                while (cursor.moveToNext()) tables += cursor.getString(0)
+            }
+            JsonWriter(output).use { json ->
+                json.setIndent("  ")
+                json.beginObject()
+                json.name("format").value("liftlog-export")
+                json.name("format_version").value(1L)
+                json.name("database_version").value(database.version.toLong())
+                json.name("exported_at").value(Instant.now().toString())
+                json.name("tables").beginObject()
+                tables.forEach { table ->
+                    json.name(table).beginArray()
+                    val quotedTable = "\"${table.replace("\"", "\"\"")}\""
+                    database.rawQuery("SELECT * FROM $quotedTable", null).use { cursor ->
+                        while (cursor.moveToNext()) {
+                            json.beginObject()
+                            cursor.columnNames.forEachIndexed { index, column ->
+                                json.name(column)
+                                when (cursor.getType(index)) {
+                                    Cursor.FIELD_TYPE_NULL -> json.nullValue()
+                                    Cursor.FIELD_TYPE_INTEGER -> json.value(cursor.getLong(index))
+                                    Cursor.FIELD_TYPE_FLOAT -> json.value(cursor.getDouble(index))
+                                    Cursor.FIELD_TYPE_BLOB -> {
+                                        json.beginObject()
+                                        json.name("base64").value(Base64.encodeToString(cursor.getBlob(index), Base64.NO_WRAP))
+                                        json.endObject()
+                                    }
+                                    else -> json.value(cursor.getString(index))
+                                }
+                            }
+                            json.endObject()
+                        }
+                    }
+                    json.endArray()
+                }
+                json.endObject()
+                json.endObject()
+            }
+            database.setTransactionSuccessful()
+        } finally {
+            database.endTransaction()
+        }
+    }
+
+    /** Replace data atomically. A failed import leaves the original database intact. */
+    fun restoreExport(input: Reader, safetyBackup: File) {
+        val content = StringBuilder()
+        val buffer = CharArray(8192)
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            require(content.length + count <= 32 * 1024 * 1024) { "Export is too large (32 MB text limit)" }
+            content.append(buffer, 0, count)
+        }
+        val backup = JSONObject(content.toString())
+        require(backup.optString("format") == "liftlog-export" && backup.optInt("format_version") == 1) { "Choose a LiftLog JSON export" }
+        require(backup.getInt("database_version") in 2..3) { "This export needs a different LiftLog version" }
+        val tables = backup.getJSONObject("tables")
+        require(backup.getInt("database_version") < 3 || tables.has("template_sets")) { "Export is missing template set defaults" }
+        val order = listOf("exercises", "templates", "template_exercises", "workouts", "workout_exercises", "workout_sets", "settings", "workout_schedule", "template_sets")
+        require(order.dropLast(1).all { tables.has(it) }) { "Export is missing required tables" }
+        require(tables.keys().asSequence().all { it in order }) { "Export contains unsupported tables" }
+        val database = writableDatabase
+        // Validate column names and SQLite types before touching existing rows.
+        val rows = order.associateWith { table ->
+            val schema = mutableMapOf<String, String>()
+            val keys = mutableSetOf<String>()
+            database.rawQuery("PRAGMA table_info($table)", null).use { c ->
+                while (c.moveToNext()) {
+                    schema[c.getString(1)] = c.getString(2)
+                    if (c.getInt(5) > 0) keys += c.getString(1)
+                }
+            }
+            val array = if (tables.has(table)) tables.getJSONArray(table) else org.json.JSONArray()
+            (0 until array.length()).map { index ->
+                val row = array.getJSONObject(index)
+                require(keys.all { row.has(it) && !row.isNull(it) }) { "Missing ID/key in $table" }
+                require(keys.all { key ->
+                    val value = row.get(key)
+                    if (schema[key] == "INTEGER") value is Number && value.toLong() > 0 else value is String && value.isNotBlank()
+                }) { "Invalid ID/key in $table" }
+                ContentValues().apply {
+                    row.keys().forEach { column ->
+                        val type = requireNotNull(schema[column]) { "Unknown column: $table.$column" }
+                        val value = row.get(column)
+                        when {
+                            value == JSONObject.NULL -> putNull(column)
+                            type == "INTEGER" && value is Number -> {
+                                require(value.toDouble().isFinite() && value.toDouble() == value.toLong().toDouble()) { "Invalid integer: $table.$column" }
+                                put(column, value.toLong())
+                            }
+                            type == "REAL" && value is Number -> {
+                                require(value.toDouble().isFinite()) { "Invalid number: $table.$column" }
+                                put(column, value.toDouble())
+                            }
+                            type == "TEXT" && value is String -> put(column, value)
+                            else -> error("Invalid value: $table.$column")
+                        }
+                    }
+                }
+            }
+        }
+        database.beginTransaction()
+        try {
+            val temporaryBackup = File(safetyBackup.parentFile, "${safetyBackup.name}.tmp")
+            try {
+                temporaryBackup.bufferedWriter(Charsets.UTF_8).use { writeExport(it) }
+                require(temporaryBackup.renameTo(safetyBackup)) { "Could not save the pre-restore copy" }
+            } finally { temporaryBackup.delete() }
+            order.reversed().forEach { database.delete(it, null, null) }
+            // Preserve imported IDs; SQLite updates AUTOINCREMENT counters on insertion.
+            database.delete("sqlite_sequence", null, null)
+            order.forEach { table -> rows.getValue(table).forEach { database.insertOrThrow(table, null, it) } }
+            database.rawQuery("PRAGMA foreign_key_check", null).use { require(!it.moveToFirst()) { "Export has broken relationships" } }
+            fun hasRows(sql: String) = database.rawQuery(sql, null).use { it.moveToFirst() }
+            require(!hasRows("SELECT id FROM workouts WHERE status NOT IN ('ACTIVE','COMPLETED','DISCARDED') OR started_at<0 OR (status='COMPLETED' AND (completed_at IS NULL OR completed_at<started_at))")) { "Invalid workout dates or status" }
+            require(!hasRows("SELECT id FROM workout_sets WHERE actual_weight<0 OR planned_weight<0 OR actual_reps<0 OR set_number<1 OR completed NOT IN (0,1) OR LENGTH(TRIM(target_reps))=0 OR (percentage IS NOT NULL AND (percentage<=0 OR percentage>1))")) { "Invalid workout sets" }
+            require(!hasRows("SELECT workout_exercise_id FROM workout_sets GROUP BY workout_exercise_id,set_number HAVING COUNT(*)>1")) { "Duplicate set numbers" }
+            require(!hasRows("SELECT id FROM exercises WHERE mode NOT IN ('MANUAL','531') OR default_weight<0 OR default_sets<1 OR default_sets>100 OR rep_min<1 OR rep_max<rep_min OR training_max<0 OR round_to<=0 OR increment<=0 OR deleted NOT IN (0,1)")) { "Invalid exercise settings" }
+            require(!hasRows("SELECT id FROM templates WHERE deleted NOT IN (0,1) OR LENGTH(TRIM(name))=0")) { "Invalid templates" }
+            require(!hasRows("SELECT id FROM workout_exercises WHERE removed NOT IN (0,1) OR mode NOT IN ('MANUAL','531')")) { "Invalid workout exercises" }
+            require(!hasRows("SELECT id FROM workouts WHERE workout_week IS NOT NULL AND workout_week NOT BETWEEN 1 AND 4")) { "Invalid workout week" }
+            require(!hasRows("SELECT day_of_week FROM workout_schedule WHERE day_of_week NOT BETWEEN 1 AND 7")) { "Invalid schedule day" }
+            require(!hasRows("SELECT template_id FROM template_sets WHERE set_number<1 OR planned_weight<0 OR actual_reps<0 OR LENGTH(TRIM(target_reps))=0")) { "Invalid template sets" }
+            require(getSettingInt("week", 0) in 1..4 && getSettingInt("cycle", 0) >= 1) { "Invalid 5/3/1 settings" }
+            database.rawQuery("SELECT COUNT(*) FROM workouts WHERE status='ACTIVE'", null).use { it.moveToFirst(); require(it.getInt(0) <= 1) { "Export has multiple active workouts" } }
+            database.setTransactionSuccessful()
+        } finally { database.endTransaction() }
     }
 
     fun getSettingInt(key: String, fallback: Int): Int {
@@ -154,7 +321,7 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
         val sql = """
             SELECT s.day_of_week, s.template_id, t.name
             FROM workout_schedule s
-            LEFT JOIN templates t ON t.id=s.template_id
+            LEFT JOIN templates t ON t.id=s.template_id AND t.deleted=0
             WHERE s.day_of_week IN (3,5,6,7)
             ORDER BY CASE s.day_of_week WHEN 3 THEN 1 WHEN 5 THEN 2 WHEN 6 THEN 3 WHEN 7 THEN 4 ELSE 5 END
         """.trimIndent()
@@ -162,7 +329,7 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
             while (c.moveToNext()) {
                 result += ScheduledWorkoutDay(
                     dayOfWeek = c.getInt(0),
-                    templateId = if (c.isNull(1)) null else c.getLong(1),
+                    templateId = if (c.isNull(1) || c.isNull(2)) null else c.getLong(1),
                     templateName = if (c.isNull(2)) null else c.getString(2)
                 )
             }
@@ -181,14 +348,14 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
     fun getScheduledDay(dayOfWeek: Int): ScheduledWorkoutDay? {
         val sql = """
             SELECT s.day_of_week, s.template_id, t.name
-            FROM workout_schedule s LEFT JOIN templates t ON t.id=s.template_id
+            FROM workout_schedule s LEFT JOIN templates t ON t.id=s.template_id AND t.deleted=0
             WHERE s.day_of_week=? LIMIT 1
         """.trimIndent()
         readableDatabase.rawQuery(sql, arrayOf(dayOfWeek.toString())).use { c ->
             if (!c.moveToFirst()) return null
             return ScheduledWorkoutDay(
                 c.getInt(0),
-                if (c.isNull(1)) null else c.getLong(1),
+                if (c.isNull(1) || c.isNull(2)) null else c.getLong(1),
                 if (c.isNull(2)) null else c.getString(2)
             )
         }
@@ -214,9 +381,9 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
         }
     }
 
-    fun getExercises(): List<Exercise> {
+    fun getExercises(deleted: Boolean = false): List<Exercise> {
         val result = mutableListOf<Exercise>()
-        readableDatabase.rawQuery("SELECT * FROM exercises ORDER BY name COLLATE NOCASE", null).use { c ->
+        readableDatabase.rawQuery("SELECT * FROM exercises WHERE deleted=? ORDER BY name COLLATE NOCASE", arrayOf(if (deleted) "1" else "0")).use { c ->
             while (c.moveToNext()) {
                 result += Exercise(
                     id = c.getLong(c.getColumnIndexOrThrow("id")),
@@ -240,7 +407,7 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
     fun getExercise(id: Long): Exercise? = getExercises().firstOrNull { it.id == id }
 
     fun findExerciseByName(name: String): Exercise? {
-        val sql = "SELECT * FROM exercises WHERE name = ? COLLATE NOCASE LIMIT 1"
+        val sql = "SELECT * FROM exercises WHERE deleted=0 AND name = ? COLLATE NOCASE LIMIT 1"
         readableDatabase.rawQuery(sql, arrayOf(name.trim())).use { c ->
             if (!c.moveToFirst()) return null
             return Exercise(
@@ -288,12 +455,14 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
     }
 
     fun deleteExercise(id: Long) {
-        writableDatabase.delete("exercises", "id=?", arrayOf(id.toString()))
+        writableDatabase.execSQL("UPDATE exercises SET deleted=1 WHERE id=?", arrayOf(id))
     }
 
-    fun getTemplates(): List<WorkoutTemplate> {
+    fun restoreExercise(id: Long) = writableDatabase.execSQL("UPDATE exercises SET deleted=0 WHERE id=?", arrayOf(id))
+
+    fun getTemplates(deleted: Boolean = false): List<WorkoutTemplate> {
         val result = mutableListOf<WorkoutTemplate>()
-        readableDatabase.rawQuery("SELECT id, name FROM templates ORDER BY name COLLATE NOCASE", null).use { c ->
+        readableDatabase.rawQuery("SELECT id, name FROM templates WHERE deleted=? ORDER BY name COLLATE NOCASE", arrayOf(if (deleted) "1" else "0")).use { c ->
             while (c.moveToNext()) result += WorkoutTemplate(c.getLong(0), c.getString(1))
         }
         return result
@@ -310,15 +479,17 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
     }
 
     fun deleteTemplate(id: Long) {
-        writableDatabase.delete("templates", "id=?", arrayOf(id.toString()))
+        writableDatabase.execSQL("UPDATE templates SET deleted=1 WHERE id=?", arrayOf(id))
     }
+
+    fun restoreTemplate(id: Long) = writableDatabase.execSQL("UPDATE templates SET deleted=0 WHERE id=?", arrayOf(id))
 
     fun getTemplateExercises(templateId: Long): List<Exercise> {
         val result = mutableListOf<Exercise>()
         val sql = """
             SELECT e.* FROM template_exercises te
             JOIN exercises e ON e.id = te.exercise_id
-            WHERE te.template_id=? ORDER BY te.sort_order, te.id
+            WHERE te.template_id=? AND e.deleted=0 ORDER BY te.sort_order, te.id
         """.trimIndent()
         readableDatabase.rawQuery(sql, arrayOf(templateId.toString())).use { c ->
             while (c.moveToNext()) {
@@ -370,7 +541,7 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
             SELECT w.id, w.template_name, w.started_at, w.completed_at, w.status,
                    COALESCE(SUM(CASE WHEN s.completed=1 THEN 1 ELSE 0 END),0), COUNT(s.id)
             FROM workouts w
-            LEFT JOIN workout_exercises we ON we.workout_id=w.id
+            LEFT JOIN workout_exercises we ON we.workout_id=w.id AND we.removed=0
             LEFT JOIN workout_sets s ON s.workout_exercise_id=we.id
             WHERE w.status=? GROUP BY w.id ORDER BY w.started_at DESC LIMIT 1
         """.trimIndent()
@@ -390,6 +561,7 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
                 put("template_name", template.name)
                 put("started_at", System.currentTimeMillis())
                 put("status", WorkoutSummary.ACTIVE)
+                put("workout_week", week)
             })
 
             exercises.forEachIndexed { exerciseIndex, exercise ->
@@ -401,32 +573,18 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
                     put("sort_order", exerciseIndex)
                 })
 
-                if (exercise.isFiveThreeOne) {
-                    ProgramMath.weekSets(week).forEachIndexed { setIndex, prescription ->
-                        val weight = ProgramMath.workingWeight(exercise.trainingMax, prescription.percentage, exercise.roundTo)
-                        db.insertOrThrow("workout_sets", null, ContentValues().apply {
-                            put("workout_exercise_id", workoutExerciseId)
-                            put("set_number", setIndex + 1)
-                            put("target_reps", prescription.reps)
-                            put("percentage", prescription.percentage)
-                            put("planned_weight", weight)
-                            put("actual_weight", weight)
-                            put("completed", 0)
-                        })
-                    }
-                } else {
-                    val reps = if (exercise.repMin == exercise.repMax) exercise.repMin.toString() else "${exercise.repMin}-${exercise.repMax}"
-                    repeat(exercise.defaultSets.coerceAtLeast(1)) { setIndex ->
-                        db.insertOrThrow("workout_sets", null, ContentValues().apply {
-                            put("workout_exercise_id", workoutExerciseId)
-                            put("set_number", setIndex + 1)
-                            put("target_reps", reps)
-                            putNull("percentage")
-                            put("planned_weight", exercise.defaultWeight)
-                            put("actual_weight", exercise.defaultWeight)
-                            put("completed", 0)
-                        })
-                    }
+                val previous = lastCompletedExerciseSets(exercise)
+                defaultsForTemplate(exercise, template.id, week, previous).forEachIndexed { setIndex, defaults ->
+                    db.insertOrThrow("workout_sets", null, ContentValues().apply {
+                        put("workout_exercise_id", workoutExerciseId)
+                        put("set_number", setIndex + 1)
+                        put("target_reps", defaults.targetReps)
+                        if (defaults.percentage == null) putNull("percentage") else put("percentage", defaults.percentage)
+                        put("planned_weight", defaults.plannedWeight)
+                        put("actual_weight", defaults.weight)
+                        if (defaults.reps == null) putNull("actual_reps") else put("actual_reps", defaults.reps)
+                        put("completed", 0)
+                    })
                 }
             }
             db.setTransactionSuccessful()
@@ -436,12 +594,25 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
         }
     }
 
+    private fun lastCompletedExerciseSets(exercise: Exercise): List<WorkoutSetRecord> {
+        val sql = """
+            SELECT we.id FROM workout_exercises we
+            JOIN workouts w ON w.id = we.workout_id
+            WHERE we.exercise_id = ? AND we.mode = ? AND w.status = ? AND we.removed=0
+            ORDER BY w.completed_at DESC, w.id DESC, we.id DESC LIMIT 1
+        """.trimIndent()
+        val previousId = readableDatabase.rawQuery(
+            sql, arrayOf(exercise.id.toString(), exercise.mode, WorkoutSummary.COMPLETED)
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else null }
+        return previousId?.let { getWorkoutSets(it) } ?: emptyList()
+    }
+
     fun getWorkout(id: Long): WorkoutSummary? {
         val sql = """
             SELECT w.id, w.template_name, w.started_at, w.completed_at, w.status,
                    COALESCE(SUM(CASE WHEN s.completed=1 THEN 1 ELSE 0 END),0), COUNT(s.id)
             FROM workouts w
-            LEFT JOIN workout_exercises we ON we.workout_id=w.id
+            LEFT JOIN workout_exercises we ON we.workout_id=w.id AND we.removed=0
             LEFT JOIN workout_sets s ON s.workout_exercise_id=we.id
             WHERE w.id=? GROUP BY w.id
         """.trimIndent()
@@ -453,7 +624,7 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
     fun getWorkoutExercises(workoutId: Long): List<WorkoutExerciseRecord> {
         val result = mutableListOf<WorkoutExerciseRecord>()
         readableDatabase.rawQuery(
-            "SELECT id, exercise_name, mode, sort_order, exercise_id FROM workout_exercises WHERE workout_id=? ORDER BY sort_order, id",
+            "SELECT id, exercise_name, mode, sort_order, exercise_id FROM workout_exercises WHERE workout_id=? AND removed=0 ORDER BY sort_order, id",
             arrayOf(workoutId.toString())
         ).use { c ->
             while (c.moveToNext()) {
@@ -517,8 +688,17 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
     }
 
     fun discardWorkout(workoutId: Long) {
-        writableDatabase.delete("workouts", "id=?", arrayOf(workoutId.toString()))
+        writableDatabase.execSQL("UPDATE workouts SET status='DISCARDED' WHERE id=?", arrayOf(workoutId))
     }
+
+    fun undoDiscardWorkout(workoutId: Long) {
+        require(getActiveWorkout() == null) { "A workout is already active" }
+        writableDatabase.execSQL("UPDATE workouts SET status='ACTIVE' WHERE id=? AND status='DISCARDED'", arrayOf(workoutId))
+    }
+
+    fun getDiscardedWorkouts(): List<WorkoutSummary> = readableDatabase.rawQuery(
+        "SELECT id FROM workouts WHERE status='DISCARDED' ORDER BY started_at DESC", null
+    ).use { c -> buildList { while (c.moveToNext()) getWorkout(c.getLong(0))?.let { add(it) } } }
 
     fun getCompletedWorkouts(limit: Int = 100): List<WorkoutSummary> {
         val result = mutableListOf<WorkoutSummary>()
@@ -526,7 +706,7 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
             SELECT w.id, w.template_name, w.started_at, w.completed_at, w.status,
                    COALESCE(SUM(CASE WHEN s.completed=1 THEN 1 ELSE 0 END),0), COUNT(s.id)
             FROM workouts w
-            LEFT JOIN workout_exercises we ON we.workout_id=w.id
+            LEFT JOIN workout_exercises we ON we.workout_id=w.id AND we.removed=0
             LEFT JOIN workout_sets s ON s.workout_exercise_id=we.id
             WHERE w.status=? GROUP BY w.id ORDER BY w.completed_at DESC LIMIT $limit
         """.trimIndent()
@@ -603,7 +783,7 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
                    COALESCE(SUM(CASE WHEN s.completed=1 THEN s.actual_weight * COALESCE(s.actual_reps,0) ELSE 0 END),0),
                    0
             FROM workouts w
-            LEFT JOIN workout_exercises we ON we.workout_id=w.id
+            LEFT JOIN workout_exercises we ON we.workout_id=w.id AND we.removed=0
             LEFT JOIN workout_sets s ON s.workout_exercise_id=we.id
             WHERE w.status=?
         """.trimIndent()
@@ -647,7 +827,7 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
         val sql = """
             SELECT we.exercise_id, we.exercise_name, s.actual_weight, s.actual_reps, w.completed_at
             FROM workouts w
-            JOIN workout_exercises we ON we.workout_id=w.id
+            JOIN workout_exercises we ON we.workout_id=w.id AND we.removed=0
             JOIN workout_sets s ON s.workout_exercise_id=we.id
             WHERE w.status=? AND s.completed=1 AND s.actual_reps IS NOT NULL AND s.actual_reps>0
             ORDER BY w.completed_at ASC, w.id ASC, we.sort_order ASC, s.set_number ASC
@@ -724,7 +904,7 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
         val sql = """
             SELECT s.actual_weight, s.actual_reps
             FROM workouts w
-            JOIN workout_exercises we ON we.workout_id=w.id
+            JOIN workout_exercises we ON we.workout_id=w.id AND we.removed=0
             JOIN workout_sets s ON s.workout_exercise_id=we.id
             WHERE w.status=? AND s.completed=1 AND s.actual_reps IS NOT NULL AND s.actual_reps>0
               AND (w.completed_at < ? OR (w.completed_at = ? AND w.id < ?))
@@ -743,6 +923,168 @@ class WorkoutDb(context: Context) : SQLiteOpenHelper(context, "liftlog.db", null
             }
         }
         return bestWeight to bestE1rm
+    }
+
+    private fun defaultsForTemplate(exercise: Exercise, templateId: Long?, week: Int, previous: List<WorkoutSetRecord>): List<WorkoutDefaults.SetDefaults> {
+        val saved = mutableListOf<WorkoutDefaults.SetDefaults>()
+        if (templateId != null) readableDatabase.rawQuery(
+            "SELECT target_reps, planned_weight, actual_reps FROM template_sets WHERE template_id=? AND exercise_id=? ORDER BY set_number",
+            arrayOf(templateId.toString(), exercise.id.toString())
+        ).use { c ->
+            while (c.moveToNext()) saved += WorkoutDefaults.SetDefaults(c.getString(0), null, c.getDouble(1), c.getDouble(1), if (c.isNull(2)) null else c.getInt(2))
+        }
+        return WorkoutDefaults.sets(exercise, week, previous, saved)
+    }
+
+    fun workoutTemplateId(workoutId: Long): Long? = readableDatabase.rawQuery(
+        "SELECT template_id FROM workouts WHERE id=?", arrayOf(workoutId.toString())
+    ).use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else null }
+
+    private fun workoutWeek(workoutId: Long): Int {
+        readableDatabase.rawQuery("SELECT workout_week FROM workouts WHERE id=?", arrayOf(workoutId.toString())).use { c ->
+            if (c.moveToFirst() && !c.isNull(0)) return c.getInt(0)
+        }
+        // Old APKs did not store the week; infer it from the snapshot's first 5/3/1 set.
+        val first = getWorkoutExercises(workoutId).firstOrNull { it.mode == Exercise.MODE_531 }
+            ?.let { getWorkoutSets(it.id).firstOrNull()?.percentage }
+        return (1..4).firstOrNull { ProgramMath.weekSets(it)[0].percentage == first } ?: getSettingInt("week", 1)
+    }
+
+    fun previousSessionSets(exerciseId: Long?, name: String, workoutId: Long): List<WorkoutSetRecord> {
+        val current = getWorkout(workoutId) ?: return emptyList()
+        val cutoff = current.completedAt ?: current.startedAt
+        val identity = if (exerciseId == null) "we.exercise_name = ? COLLATE NOCASE" else "we.exercise_id = ?"
+        val sql = """
+            SELECT we.id FROM workout_exercises we JOIN workouts w ON w.id=we.workout_id
+            WHERE $identity AND we.removed=0 AND w.status=? AND w.id<>?
+              AND (w.completed_at<? OR (w.completed_at=? AND w.id<?))
+            ORDER BY w.completed_at DESC, w.id DESC, we.id DESC LIMIT 1
+        """.trimIndent()
+        val id = readableDatabase.rawQuery(sql, arrayOf(exerciseId?.toString() ?: name,
+            WorkoutSummary.COMPLETED, workoutId.toString(), cutoff.toString(), cutoff.toString(), workoutId.toString())
+        ).use { c -> if (c.moveToFirst()) c.getLong(0) else null }
+        return id?.let { getWorkoutSets(it) } ?: emptyList()
+    }
+
+    fun renameWorkout(id: Long, name: String) {
+        require(name.isNotBlank())
+        writableDatabase.execSQL("UPDATE workouts SET template_name=? WHERE id=?", arrayOf(name.trim(), id))
+    }
+
+    fun addWorkoutExercise(workoutId: Long, exerciseId: Long): Long {
+        val exercise = requireNotNull(getExercise(exerciseId))
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            require(getWorkout(workoutId) != null)
+            require(getWorkoutExercises(workoutId).none { it.exerciseId == exerciseId }) { "Exercise is already in this workout" }
+            val id = database.insertOrThrow("workout_exercises", null, ContentValues().apply {
+                put("workout_id", workoutId); put("exercise_id", exerciseId); put("exercise_name", exercise.name)
+                put("mode", exercise.mode); put("sort_order", getWorkoutExercises(workoutId).maxOfOrNull { it.sortOrder }?.plus(1) ?: 0)
+            })
+            val defaults = defaultsForTemplate(exercise, workoutTemplateId(workoutId), workoutWeek(workoutId), lastCompletedExerciseSets(exercise))
+            replaceWorkoutSets(id, defaults.mapIndexed { i, s -> WorkoutSetRecord(0, id, i + 1, s.targetReps, s.percentage, s.plannedWeight, s.weight, s.reps, false) })
+            database.setTransactionSuccessful()
+            return id
+        } finally { database.endTransaction() }
+    }
+
+    fun replaceWorkoutSets(exerciseRecordId: Long, sets: List<WorkoutSetRecord>) {
+        require(sets.isNotEmpty() && sets.size <= 100) { "Use between 1 and 100 sets" }
+        require(sets.all { it.actualWeight.isFinite() && it.actualWeight >= 0 && (it.actualReps == null || it.actualReps >= 0) && it.targetReps.isNotBlank() })
+        val originalIds = getWorkoutSets(exerciseRecordId).map { it.id }.toSet()
+        val retainedIds = sets.filter { it.id != 0L }.map { it.id }
+        require(retainedIds.all { it in originalIds } && retainedIds.distinct().size == retainedIds.size)
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            database.delete("workout_sets", "workout_exercise_id=?", arrayOf(exerciseRecordId.toString()))
+            sets.forEachIndexed { i, set ->
+                database.insertOrThrow("workout_sets", null, ContentValues().apply {
+                    if (set.id != 0L) put("id", set.id)
+                    put("workout_exercise_id", exerciseRecordId); put("set_number", i + 1)
+                    put("target_reps", set.targetReps); if (set.percentage == null) putNull("percentage") else put("percentage", set.percentage)
+                    put("planned_weight", set.plannedWeight); put("actual_weight", set.actualWeight)
+                    if (set.actualReps == null) putNull("actual_reps") else put("actual_reps", set.actualReps)
+                    put("completed", if (set.completed) 1 else 0)
+                })
+            }
+            database.setTransactionSuccessful()
+        } finally { database.endTransaction() }
+    }
+
+    fun removeWorkoutExercise(id: Long) = writableDatabase.execSQL("UPDATE workout_exercises SET removed=1 WHERE id=?", arrayOf(id))
+    fun undoRemoveWorkoutExercise(id: Long) = writableDatabase.execSQL("UPDATE workout_exercises SET removed=0 WHERE id=?", arrayOf(id))
+
+    fun moveWorkoutExercise(workoutId: Long, id: Long, direction: Int) {
+        val ordered = getWorkoutExercises(workoutId).toMutableList()
+        val index = ordered.indexOfFirst { it.id == id }
+        val target = index + direction
+        if (index < 0 || target !in ordered.indices) return
+        java.util.Collections.swap(ordered, index, target)
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            ordered.forEachIndexed { i, item -> database.execSQL("UPDATE workout_exercises SET sort_order=? WHERE id=?", arrayOf(i, item.id)) }
+            database.setTransactionSuccessful()
+        } finally { database.endTransaction() }
+    }
+
+    /** Save this session's structure and manual per-set defaults without changing other templates. */
+    fun updateTemplateFromWorkout(workoutId: Long): Long {
+        val workout = requireNotNull(getWorkout(workoutId))
+        val records = getWorkoutExercises(workoutId)
+        require(records.isNotEmpty()) { "An empty workout cannot become a template" }
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            val origin = workoutTemplateId(workoutId)
+            val templateId = getTemplates().firstOrNull { it.id == origin }?.id ?: createTemplate(workout.templateName)
+            renameTemplate(templateId, workout.templateName)
+            database.delete("template_exercises", "template_id=?", arrayOf(templateId.toString()))
+            database.delete("template_sets", "template_id=?", arrayOf(templateId.toString()))
+            records.forEach { record ->
+                val existing = record.exerciseId?.let { getExercise(it) }
+                val old = existing ?: getExercises(true).firstOrNull { it.id == record.exerciseId }
+                val snapshotSets = getWorkoutSets(record.id)
+                val inferredMax = snapshotSets.firstOrNull { (it.percentage ?: 0.0) > 0.0 }
+                    ?.let { it.plannedWeight / requireNotNull(it.percentage) } ?: 0.0
+                val exerciseId = existing?.takeIf { it.mode == record.mode }?.id ?: saveExercise(
+                    (old ?: Exercise(name = record.exerciseName, mode = record.mode)).copy(
+                        id = 0, name = record.exerciseName, mode = record.mode,
+                        trainingMax = old?.takeIf { it.mode == record.mode }?.trainingMax ?: inferredMax
+                    )
+                )
+                addExerciseToTemplate(templateId, exerciseId)
+                snapshotSets.forEach { set ->
+                    database.insertOrThrow("template_sets", null, ContentValues().apply {
+                        put("template_id", templateId); put("exercise_id", exerciseId); put("set_number", set.setNumber)
+                        put("target_reps", set.targetReps); put("planned_weight", set.actualWeight)
+                        if (set.actualReps == null) putNull("actual_reps") else put("actual_reps", set.actualReps)
+                    })
+                }
+            }
+            database.execSQL("UPDATE workouts SET template_id=? WHERE id=?", arrayOf(templateId, workoutId))
+            database.setTransactionSuccessful()
+            return templateId
+        } finally { database.endTransaction() }
+    }
+
+    fun getExerciseProgress(exerciseId: Long?, name: String): List<ExerciseProgressPoint> {
+        val identity = if (exerciseId == null) "we.exercise_name = ? COLLATE NOCASE" else "we.exercise_id = ?"
+        val result = mutableListOf<ExerciseProgressPoint>()
+        val sql = """
+            SELECT w.id, w.completed_at, MAX(s.actual_weight), MAX(s.actual_reps),
+                MAX(CASE WHEN s.actual_reps=1 THEN s.actual_weight ELSE s.actual_weight * (1.0 + s.actual_reps/30.0) END)
+            FROM workouts w JOIN workout_exercises we ON we.workout_id=w.id
+            JOIN workout_sets s ON s.workout_exercise_id=we.id
+            WHERE w.status=? AND we.removed=0 AND s.completed=1 AND s.actual_reps>0 AND $identity
+            GROUP BY w.id ORDER BY w.completed_at DESC, w.id DESC LIMIT 100
+        """.trimIndent()
+        readableDatabase.rawQuery(sql, arrayOf(WorkoutSummary.COMPLETED, exerciseId?.toString() ?: name)).use { c ->
+            while (c.moveToNext()) result += ExerciseProgressPoint(c.getLong(0), c.getLong(1), c.getDouble(2), c.getInt(3), c.getDouble(4))
+        }
+        return result.reversed()
     }
 
     fun advanceFiveThreeOneWeek(): Pair<Int, Int> {

@@ -4,6 +4,8 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.Manifest
 import android.app.NotificationManager
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.graphics.Color
@@ -28,6 +30,8 @@ import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import java.io.File
+import java.io.Reader
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -42,22 +46,194 @@ class MainActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private var elapsedRunnable: Runnable? = null
     private var restRunnable: Runnable? = null
-    private var restEndAt: Long = 0L
+    private var exportBackup: File? = null
+    private var dataDialog: AlertDialog? = null
+    private var currentBackAction: (() -> Unit)? = null
+    private var restDisplay: TextView? = null
+    private var restWorkoutId: Long = 0
+    private var elapsedDisplay: TextView? = null
+    private var elapsedStartedAt: Long = 0
+    private var palette = AppPalette.LIGHT
+
+    private val COLOR_BACKGROUND get() = palette.background
+    private val COLOR_SURFACE get() = palette.surface
+    private val COLOR_TEXT get() = palette.text
+    private val COLOR_MUTED get() = palette.muted
+    private val COLOR_BORDER get() = palette.border
+    private val COLOR_PRIMARY get() = palette.primary
+    private val COLOR_PRIMARY_SOFT get() = palette.primarySoft
+    private val COLOR_TEAL_SOFT get() = palette.tealSoft
+    private val COLOR_DANGER get() = palette.danger
+    private val COLOR_DANGER_SOFT get() = palette.dangerSoft
+    private val COLOR_PR get() = palette.pr
+    private val COLOR_PR_SOFT get() = palette.prSoft
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
         db = WorkoutDb(this)
+        val appearance = db.getSettingString("appearance", "system")
+        val dark = when (appearance) {
+            "dark" -> true
+            "light" -> false
+            else -> resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK == android.content.res.Configuration.UI_MODE_NIGHT_YES
+        }
+        palette = if (dark) AppPalette.DARK else AppPalette.LIGHT
+        // Apply the native theme before creating widgets so dialogs, spinners and checkboxes match.
+        setTheme(resources.getIdentifier(if (dark) "Theme.FiveThreeOne.Dark" else "Theme.FiveThreeOne.Light", "style", packageName))
+        super.onCreate(savedInstanceState)
+        exportBackup = savedInstanceState?.getString("export_backup")?.let { File(it) }
         window.statusBarColor = COLOR_BACKGROUND
         window.navigationBarColor = COLOR_SURFACE
+        if (Build.VERSION.SDK_INT >= 30) {
+            val lightBars = android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+            // Accessing the decor view creates it; Window.getInsetsController() can
+            // crash on Android 11–14 when called before the first setContentView.
+            window.decorView.windowInsetsController?.setSystemBarsAppearance(if (dark) 0 else lightBars, lightBars)
+        } else {
+            @Suppress("DEPRECATION")
+            val lightBars = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = (window.decorView.systemUiVisibility and lightBars.inv()) or if (dark) 0 else lightBars
+        }
         NotificationScheduler.createChannel(this)
         NotificationScheduler.scheduleAll(this)
-        showDashboard()
+        val requestedWorkout = savedInstanceState?.getLong("visible_workout_id") ?: intent.getLongExtra("workout_id", 0)
+        if (requestedWorkout > 0 && db.getWorkout(requestedWorkout)?.status == WorkoutSummary.ACTIVE) showActiveWorkout(requestedWorkout)
+        else showDashboard()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        exportBackup?.let { outState.putString("export_backup", it.absolutePath) }
+        outState.putLong("visible_workout_id", if (elapsedDisplay != null) restWorkoutId else 0)
+        super.onSaveInstanceState(outState)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        RestTimer.reschedule(this)
+        elapsedDisplay?.let { startElapsedTimer(elapsedStartedAt, it) }
+        restDisplay?.let { bindRestTimer(it, restWorkoutId) }
+    }
+
+    override fun onStop() {
+        stopUiTimers()
+        super.onStop()
+    }
+
+    @Deprecated("Uses the shared screen back action")
+    override fun onBackPressed() {
+        currentBackAction?.invoke() ?: super.onBackPressed()
     }
 
     override fun onDestroy() {
         stopUiTimers()
+        dataDialog?.dismiss()
         db.close()
         super.onDestroy()
+    }
+
+    private fun chooseExportDestination(backup: File? = null) {
+        exportBackup = backup
+        val timestamp = java.time.LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd-HHmmss"))
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "application/json"
+            putExtra(Intent.EXTRA_TITLE, "liftlog-export-$timestamp.json")
+        }
+        try {
+            startActivityForResult(intent, REQUEST_EXPORT_DATA)
+        } catch (_: ActivityNotFoundException) {
+            toast("No file picker is available to save the export.")
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_RESTORE_DATA && resultCode == RESULT_OK) {
+            val source = data?.data ?: return
+            confirm("Replace your current data?", "This restores the selected export, replacing all current workouts, exercises, templates and settings. A local copy of the replaced data will be kept so you can undo the restore.") {
+                val resolver = applicationContext.contentResolver
+                restoreData { resolver.openInputStream(source)?.bufferedReader(Charsets.UTF_8) ?: error("Cannot open the selected file") }
+            }
+            return
+        }
+        if (requestCode != REQUEST_EXPORT_DATA || resultCode != RESULT_OK) return
+        val destination = data?.data ?: return
+        val appContext = applicationContext
+        val savedBackup = exportBackup
+        exportBackup = null
+        toast("Exporting your data…")
+        Thread({
+            var temporaryFile: File? = null
+            val message = try {
+                val snapshot = File.createTempFile("liftlog-export-", ".json", appContext.cacheDir)
+                temporaryFile = snapshot
+                if (savedBackup != null) savedBackup.copyTo(snapshot, overwrite = true)
+                else {
+                    val exportDb = WorkoutDb(appContext)
+                    try {
+                        snapshot.bufferedWriter(Charsets.UTF_8).use { exportDb.writeExport(it) }
+                    } finally { exportDb.close() }
+                }
+                // Finish the database snapshot before copying to a potentially slow cloud provider.
+                val output = appContext.contentResolver.openOutputStream(destination, "wt")
+                    ?: throw java.io.IOException("Could not open the export destination")
+                output.use { stream -> snapshot.inputStream().use { it.copyTo(stream) } }
+                "All data exported successfully."
+            } catch (_: Exception) {
+                "Export failed. The selected file may be incomplete; please try again."
+            } finally {
+                temporaryFile?.delete()
+            }
+            Handler(Looper.getMainLooper()).post {
+                Toast.makeText(appContext, message, Toast.LENGTH_LONG).show()
+            }
+        }, "LiftLog-export").start()
+    }
+
+    private fun chooseRestoreSource() {
+        try {
+            startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/json", "text/plain", "application/octet-stream"))
+            }, REQUEST_RESTORE_DATA)
+        } catch (_: ActivityNotFoundException) { toast("No file picker is available.") }
+    }
+
+    private fun lastRestoreBackup(): File? = File(filesDir, "restore-backups").listFiles()
+        ?.filter { it.extension == "json" }?.maxByOrNull { it.lastModified() }
+
+    private fun restoreData(open: () -> Reader) {
+        val appContext = applicationContext
+        val previousOrientation = requestedOrientation
+        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LOCKED
+        dataDialog = AlertDialog.Builder(this).setTitle("Restoring data…")
+            .setMessage("Validating the export and saving your current data.").setCancelable(false).show()
+        Thread({
+            val failure = try {
+                val folder = File(appContext.filesDir, "restore-backups").apply { mkdirs() }
+                val backup = File(folder, "before-restore-${System.currentTimeMillis()}-${System.nanoTime()}.json")
+                val restoreDb = WorkoutDb(appContext)
+                try { open().use { restoreDb.restoreExport(it, backup) } } finally { restoreDb.close() }
+                // The restore has committed. Auxiliary notification failures must not report a rollback.
+                runCatching { RestTimer.stop(appContext) }
+                runCatching { NotificationScheduler.scheduleAll(appContext) }
+                null
+            } catch (error: Exception) { error.message ?: "The file could not be restored" }
+            Handler(Looper.getMainLooper()).post {
+                if (!isDestroyed) {
+                    dataDialog?.dismiss()
+                    dataDialog = null
+                    requestedOrientation = previousOrientation
+                    if (failure == null) {
+                        toast("Data restored. You can undo this from Home → Your data.")
+                        showDashboard()
+                        recreate() // Apply the appearance preference from the restored settings.
+                    } else AlertDialog.Builder(this).setTitle("Restore failed")
+                        .setMessage("$failure. Your existing data has not been replaced.").setPositiveButton("OK", null).show()
+                }
+            }
+        }, "LiftLog-restore").start()
     }
 
     private fun showDashboard() {
@@ -80,7 +256,7 @@ class MainActivity : Activity() {
         root.addView(card().apply {
             addView(text("5/3/1 cycle $cycle · week $week", 18f, true))
             addView(text(weekName(week), 14f, false, COLOR_MUTED))
-            addView(text("Any exercise using 5/3/1 uses this week and its own Training Max. Manual exercises use their saved set/rep/weight defaults.", 14f))
+            addView(text("5/3/1 follows this week and each exercise's Training Max. Manual exercises remember your last completed session.", 14f))
             addView(space(8))
             addView(button(if (week == 4) "Finish deload + progress Training Maxes" else "Advance to week ${week + 1}") {
                 val (newWeek, newCycle) = db.advanceFiveThreeOneWeek()
@@ -129,7 +305,7 @@ class MainActivity : Activity() {
                         val workoutId = db.startWorkout(template, week)
                         showActiveWorkout(workoutId)
                     }
-                }, matchWithMargin(56, 4))
+                }, matchWrapWithMargin(4))
             }
         }
 
@@ -137,7 +313,7 @@ class MainActivity : Activity() {
         root.addView(card().apply {
             addView(text("Last 12 weeks", 17f, true))
             addView(text("Darker squares mean more completed workouts that day.", 13f, false, COLOR_MUTED))
-            addView(HeatmapView(this@MainActivity).apply { counts = db.workoutCountsByDate() })
+            addView(HeatmapView(this@MainActivity, palette).apply { counts = db.workoutCountsByDate() })
         })
 
         root.addView(sectionTitle("Recent workouts"))
@@ -149,6 +325,42 @@ class MainActivity : Activity() {
             root.addView(space(6))
             root.addView(button("View all history") { showHistory() })
         }
+
+        root.addView(sectionTitle("Appearance"))
+        val appearance = db.getSettingString("appearance", "system")
+        val currentAppearance = when (appearance) { "dark" -> "Dark"; "light" -> "Light"; else -> "Follow phone setting" }
+        root.addView(softButton("Theme: $currentAppearance") {
+            val choices = listOf("system", "light", "dark")
+            AlertDialog.Builder(this).setTitle("Appearance")
+                .setSingleChoiceItems(arrayOf("Follow phone setting", "Light", "Dark"), choices.indexOf(appearance).coerceAtLeast(0)) { dialog, index ->
+                    if (choices[index] != appearance) {
+                        db.setSettingString("appearance", choices[index])
+                        dialog.dismiss()
+                        recreate()
+                    } else dialog.dismiss()
+                }.setNegativeButton("Cancel", null).show()
+        })
+
+        root.addView(sectionTitle("Your data"))
+        root.addView(card().apply {
+            addView(text("Export all data", 18f, true))
+            addView(text("Save all exercises, templates, workouts (including one in progress), sets, settings and reminders as a JSON file. Choose your phone storage or an available cloud drive.", 14f))
+            addView(space(8))
+            addView(softButton("Export all data") { chooseExportDestination() })
+            addView(space(6))
+            addView(softButton("Restore from export") { chooseRestoreSource() })
+            addView(space(6))
+            addView(softButton("Recently deleted") { showTrash() })
+            lastRestoreBackup()?.let { backup ->
+                addView(space(6))
+                addView(softButton("Undo last restore") {
+                    confirm("Restore the previous data?", "Your current data will be replaced by the saved pre-restore copy. A copy of the current data will also be kept.") {
+                        restoreData { backup.bufferedReader(Charsets.UTF_8) }
+                    }
+                })
+                addView(softButton("Export pre-restore copy") { chooseExportDestination(backup) })
+            }
+        })
     }
 
     private fun showExercises() {
@@ -174,6 +386,7 @@ class MainActivity : Activity() {
                 addView(text(subtitle, 14f, false, COLOR_MUTED))
                 addView(space(8))
                 addView(button("Edit") { showExerciseEditor(exercise) })
+                addView(softButton("View progress") { showProgress(exercise.id, exercise.name) { showExercises() } })
             }, matchWrapWithMargin(5))
         }
     }
@@ -269,6 +482,7 @@ class MainActivity : Activity() {
                 confirm("Delete ${existing.name}?", "It will also be removed from templates. Completed workout history keeps its saved exercise name and sets.") {
                     db.deleteExercise(existing.id)
                     showExercises()
+                    offerUndo("Exercise moved to Recently deleted") { db.restoreExercise(existing.id); showExercises() }
                 }
             })
         }
@@ -366,7 +580,7 @@ class MainActivity : Activity() {
                         db.addExerciseToTemplate(template.id, exerciseId)
                         toast("${preset.name} added.")
                         showTemplateEditor(template)
-                    }, matchWithMargin(46, 2))
+                    }, matchWrapWithMargin(3))
                 }
                 root.addView(categoryCard, matchWrapWithMargin(5))
             }
@@ -405,7 +619,11 @@ class MainActivity : Activity() {
         root.addView(dangerButton("Delete template") {
             confirm("Delete ${template.name}?", "Completed workout history will remain.") {
                 db.deleteTemplate(template.id)
+                NotificationScheduler.scheduleAll(this)
                 showTemplates()
+                offerUndo("Template moved to Recently deleted") {
+                    db.restoreTemplate(template.id); NotificationScheduler.scheduleAll(this); showTemplates()
+                }
             }
         })
     }
@@ -501,6 +719,176 @@ class MainActivity : Activity() {
         else -> "Day"
     }
 
+    private fun offerUndo(message: String, undo: () -> Unit) {
+        AlertDialog.Builder(this).setTitle(message).setMessage("You can also recover this item from Home → Recently deleted.")
+            .setPositiveButton("Undo") { _, _ -> undo() }.setNegativeButton("Done", null).show()
+    }
+
+    private fun showTrash() {
+        setScreen("Recently deleted", false, backAction = { showDashboard() })
+        val exercises = db.getExercises(true)
+        val templates = db.getTemplates(true)
+        val workouts = db.getDiscardedWorkouts()
+        root.addView(infoCard("Deleted exercises and templates keep their original IDs and membership. Restoring an item reconnects it to its templates. Discarded workouts can be resumed when no other workout is active."))
+        if (exercises.isEmpty() && templates.isEmpty() && workouts.isEmpty()) root.addView(infoCard("Nothing to restore."))
+        exercises.forEach { item -> root.addView(softButton("Restore exercise: ${item.name}") { db.restoreExercise(item.id); showTrash() }) }
+        templates.forEach { item -> root.addView(softButton("Restore template: ${item.name}") {
+            db.restoreTemplate(item.id); NotificationScheduler.scheduleAll(this); showTrash()
+        }) }
+        workouts.forEach { item -> root.addView(softButton("Resume: ${item.templateName} · ${formatDate(item.startedAt)}") {
+            if (db.getActiveWorkout() != null) toast("Finish the current workout first.")
+            else { db.undoDiscardWorkout(item.id); showActiveWorkout(item.id) }
+        }) }
+    }
+
+    private fun showProgress(exerciseId: Long?, name: String, back: () -> Unit) {
+        setScreen("Exercise progress", false, backAction = back)
+        root.addView(text(name, 22f, true))
+        val points = db.getExerciseProgress(exerciseId, name)
+        if (points.isEmpty()) { root.addView(infoCard("Complete some sets with reps logged to see progress.")); return }
+        root.addView(infoCard("Each point shows a session's highest weight, highest reps or best estimated 1RM. Tap a point to inspect it. Estimates are calculated from logged weight and reps."))
+        val selected = text("Tap a point for its values", 14f)
+        val chart = ProgressChartView(this, palette).apply {
+            this.points = points
+            contentDescription = "${name} progress over ${points.size} sessions. The session values are listed below."
+            onSelected = { point -> selected.text = "${formatDate(point.at)} · ${formatKg(point.weight)} · ${point.reps} reps · e1RM ${formatKg(point.estimatedOneRepMax)}" }
+        }
+        val controls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        listOf("Weight (kg)", "Reps", "e1RM (kg)").forEachIndexed { i, title ->
+            controls.addView(compactButton(title) { chart.metric = i }, weightedActionParams())
+        }
+        root.addView(controls)
+        root.addView(chart, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(230)))
+        root.addView(selected)
+        root.addView(sectionTitle("Sessions · newest first"))
+        points.reversed().forEach { point -> root.addView(softButton("${formatDate(point.at)}\n${formatKg(point.weight)} · ${point.reps} reps · e1RM ${formatKg(point.estimatedOneRepMax)}") { showHistoryDetail(point.workoutId) }) }
+    }
+
+    private fun openWorkout(workoutId: Long) {
+        if (db.getWorkout(workoutId)?.status == WorkoutSummary.ACTIVE) showActiveWorkout(workoutId)
+        else showHistoryDetail(workoutId)
+    }
+
+    private fun saveWorkoutTemplate(workoutId: Long) {
+        try {
+            db.updateTemplateFromWorkout(workoutId)
+            NotificationScheduler.scheduleAll(this)
+            toast("Template updated. Other templates are unchanged.")
+            showHistoryDetail(workoutId)
+        } catch (error: IllegalArgumentException) { toast(error.message ?: "Unable to update the template.") }
+    }
+
+    private fun showWorkoutEditor(workoutId: Long) {
+        val workout = db.getWorkout(workoutId) ?: return showDashboard()
+        setScreen("Edit workout", false, backAction = { openWorkout(workoutId) })
+        root.addView(infoCard(if (workout.status == WorkoutSummary.ACTIVE)
+            "Changes here affect only this workout. At completion, you can choose whether to update its template."
+            else "Correct this saved workout. Statistics, personal records and progress charts update from the saved values."))
+        val name = textInput("Workout name", workout.templateName)
+        root.addView(name, matchWithMargin(52, 4))
+        root.addView(softButton("Save workout name") {
+            if (name.text.toString().isBlank()) toast("Enter a workout name.")
+            else { db.renameWorkout(workoutId, name.text.toString()); toast("Workout name saved.") }
+        })
+        val records = db.getWorkoutExercises(workoutId)
+        records.forEach { record ->
+            root.addView(card().apply {
+                addView(text(record.exerciseName, 18f, true))
+                addView(text("${db.getWorkoutSets(record.id).size} sets", 13f, false, COLOR_MUTED))
+                addView(softButton("Edit weights, reps and sets") { showWorkoutExerciseEditor(workoutId, record) })
+                val order = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL }
+                order.addView(compactButton("Move up") { db.moveWorkoutExercise(workoutId, record.id, -1); showWorkoutEditor(workoutId) }, weightedActionParams())
+                order.addView(compactButton("Move down") { db.moveWorkoutExercise(workoutId, record.id, 1); showWorkoutEditor(workoutId) }, weightedActionParams())
+                addView(order)
+                addView(dangerButton("Remove from this workout") {
+                    confirm("Remove ${record.exerciseName}?", "Its sets will be removed from this workout. The exercise library and template stay unchanged.") {
+                        db.removeWorkoutExercise(record.id); showWorkoutEditor(workoutId)
+                        AlertDialog.Builder(this@MainActivity).setTitle("Exercise removed")
+                            .setPositiveButton("Undo") { _, _ -> db.undoRemoveWorkoutExercise(record.id); showWorkoutEditor(workoutId) }
+                            .setNegativeButton("Done", null).show()
+                    }
+                })
+            }, matchWrapWithMargin(5))
+        }
+        val selected = records.mapNotNull { it.exerciseId }.toSet()
+        val available = db.getExercises().filter { it.id !in selected }
+        fun add(exerciseId: Long) {
+            try { db.addWorkoutExercise(workoutId, exerciseId); showWorkoutEditor(workoutId) }
+            catch (error: IllegalArgumentException) { toast(error.message ?: "Could not add the exercise.") }
+        }
+        root.addView(sectionTitle("Add exercises"))
+        if (available.isNotEmpty()) {
+            val spinner = Spinner(this).apply { adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, available.map { it.name }) }
+            root.addView(spinner, matchWithMargin(54, 4))
+            root.addView(button("Add from library") { add(available[spinner.selectedItemPosition].id) })
+        }
+        root.addView(softButton("Create a custom exercise") {
+            showExerciseEditor(null, backAction = { showWorkoutEditor(workoutId) }, onSaved = { add(it) })
+        })
+        ExercisePresets.categories.forEach { category ->
+            root.addView(sectionTitle(category))
+            ExercisePresets.inCategory(category).forEach { preset ->
+                if (records.none { it.exerciseName.equals(preset.name, true) }) root.addView(softButton("+ ${preset.name}") { add(db.ensureExercise(preset.toExercise())) }, matchWrapWithMargin(3))
+            }
+        }
+        root.addView(space(12))
+        root.addView(button(if (workout.status == WorkoutSummary.ACTIVE) "Return to workout" else "View updated summary") { openWorkout(workoutId) })
+    }
+
+    private fun showWorkoutExerciseEditor(workoutId: Long, exercise: WorkoutExerciseRecord) {
+        fun leave() = confirm("Leave without saving?", "Your set edits on this page will be discarded.") { openWorkout(workoutId) }
+        setScreen("Edit sets", false, backAction = { leave() })
+        root.addView(text(exercise.exerciseName, 22f, true))
+        root.addView(infoCard("Edit this session's targets, weights, reps and completion marks. Save when finished. Adding or removing sets here does not change its template yet."))
+        data class Draft(val original: WorkoutSetRecord, val card: View, val target: EditText, val weight: EditText, val reps: EditText, val done: CheckBox)
+        val drafts = mutableListOf<Draft>()
+        val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(rows)
+        fun append(set: WorkoutSetRecord) {
+            val container = card()
+            val target = textInput("Target reps", set.targetReps)
+            val weight = numberInput("Weight (kg)", formatRaw(set.actualWeight))
+            val reps = integerInput("Actual reps", set.actualReps?.toString() ?: "")
+            val done = CheckBox(this).apply { text = "Done"; isChecked = set.completed }
+            container.addView(label("Target reps")); container.addView(target, matchWithMargin(48, 2))
+            container.addView(label("Weight (kg)")); container.addView(weight, matchWithMargin(48, 2))
+            container.addView(label("Actual reps (blank if not logged)")); container.addView(reps, matchWithMargin(48, 2))
+            container.addView(done)
+            val draft = Draft(set, container, target, weight, reps, done)
+            drafts += draft
+            container.addView(dangerButton("Remove set") {
+                if (drafts.size <= 1) toast("Keep at least one set, or remove the exercise instead.")
+                else { drafts.remove(draft); rows.removeView(container) }
+            })
+            rows.addView(container, matchWrapWithMargin(5))
+        }
+        db.getWorkoutSets(exercise.id).forEach { append(it) }
+        root.addView(softButton("+ Add set") {
+            if (drafts.size >= 100) toast("Maximum 100 sets per exercise.")
+            else {
+                val last = drafts.lastOrNull()
+                val weight = last?.weight?.text?.toString()?.toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0 } ?: 0.0
+                append(WorkoutSetRecord(0, exercise.id, drafts.size + 1, last?.target?.text?.toString() ?: "8-12", null, weight, weight, null, false))
+            }
+        })
+        root.addView(button("Save sets") {
+            try {
+                val values = drafts.map { draft ->
+                    val weight = requireNotNull(draft.weight.text.toString().toDoubleOrNull()) { "Enter a valid weight for every set" }
+                    val repsText = draft.reps.text.toString().trim()
+                    val reps = if (repsText.isBlank()) null else requireNotNull(repsText.toIntOrNull()) { "Enter whole-number reps" }
+                    require(weight.isFinite() && weight >= 0 && (reps == null || reps >= 0)) { "Weights and reps cannot be negative" }
+                    val target = draft.target.text.toString().trim()
+                    require(target.isNotEmpty()) { "Enter target reps for every set" }
+                    draft.original.copy(actualWeight = weight, actualReps = reps, targetReps = target, completed = draft.done.isChecked)
+                }
+                db.replaceWorkoutSets(exercise.id, values)
+                toast("Set changes saved.")
+                openWorkout(workoutId)
+            } catch (error: IllegalArgumentException) { toast(error.message ?: "Check the set values.") }
+        })
+    }
+
     private fun showActiveWorkout(workoutId: Long) {
         val workout = db.getWorkout(workoutId) ?: run {
             showDashboard()
@@ -520,6 +908,8 @@ class MainActivity : Activity() {
         timerCard.addView(text("Started ${formatDateTime(workout.startedAt)}", 13f, false, COLOR_MUTED))
         root.addView(timerCard)
         startElapsedTimer(workout.startedAt, elapsed)
+        root.addView(space(8))
+        root.addView(softButton("Edit workout / add exercises") { showWorkoutEditor(workoutId) })
 
         root.addView(space(10))
         val restCard = card()
@@ -527,7 +917,7 @@ class MainActivity : Activity() {
         restCard.addView(restText)
         val restButtons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         listOf(60, 90, 120).forEach { seconds ->
-            restButtons.addView(compactButton("${seconds}s") { startRestTimer(seconds, restText) }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { setMargins(dp(2), 0, dp(2), 0) })
+            restButtons.addView(compactButton("${seconds}s") { startRestTimer(seconds, restText, workoutId) }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { setMargins(dp(2), 0, dp(2), 0) })
         }
         restButtons.addView(compactButton("Stop") {
             stopRestTimer()
@@ -535,7 +925,46 @@ class MainActivity : Activity() {
         }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { setMargins(dp(2), 0, dp(2), 0) })
         restCard.addView(space(8))
         restCard.addView(restButtons)
+        val adjustments = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        listOf(-30, 30).forEach { delta ->
+            adjustments.addView(compactButton(if (delta > 0) "+30s" else "−30s") {
+                if (RestTimer.endAt(this) == 0L) toast("Start a rest timer first.")
+                else RestTimer.adjust(this, delta)
+            }, weightedActionParams())
+        }
+        val duration = integerInput("Seconds", db.getSettingInt("rest_seconds", 90).toString())
+        adjustments.addView(duration, LinearLayout.LayoutParams(0, dp(48), 1f))
+        adjustments.addView(compactButton("Start") {
+            val seconds = duration.text.toString().toIntOrNull()
+            if (seconds == null || seconds !in 1..3600) toast("Enter 1–3600 seconds.")
+            else { db.setSettingInt("rest_seconds", seconds); startRestTimer(seconds, restText, workoutId) }
+        }, weightedActionParams())
+        restCard.addView(adjustments)
+        val options = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        listOf("Vibrate" to "rest_vibrate", "Sound" to "rest_sound").forEach { (title, key) ->
+            options.addView(CheckBox(this).apply {
+                text = title; isChecked = db.getSettingInt(key, 1) == 1
+                setOnCheckedChangeListener { _, checked -> db.setSettingInt(key, if (checked) 1 else 0) }
+            }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        }
+        restCard.addView(options)
+        if (!getSystemService(NotificationManager::class.java).areNotificationsEnabled()) {
+            restCard.addView(softButton("Allow rest notifications") {
+                if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) requestNotificationPermissionIfNeeded()
+                else startActivity(Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName))
+            })
+        }
+        if (!RestTimer.hasPreciseAlarms(this)) {
+            restCard.addView(text("Background rest alerts may be delayed until precise alarms are enabled.", 12f, false, COLOR_MUTED))
+            restCard.addView(softButton("Enable precise rest alerts") {
+                if (Build.VERSION.SDK_INT >= 31) try {
+                    startActivity(Intent(android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+                        android.net.Uri.parse("package:$packageName")))
+                } catch (_: ActivityNotFoundException) { toast("Open Android settings → Alarms & reminders for LiftLog.") }
+            })
+        }
         root.addView(restCard)
+        bindRestTimer(restText, workoutId)
 
         root.addView(sectionTitle("Sets"))
         db.getWorkoutExercises(workoutId).forEach { exerciseRecord ->
@@ -544,9 +973,11 @@ class MainActivity : Activity() {
             exerciseCard.addView(text(if (exerciseRecord.mode == Exercise.MODE_531) "5/3/1 calculated weights · edit any weight if needed" else "Manual prescription · edit weight or actual reps as you train", 13f, false, COLOR_MUTED))
             exerciseCard.addView(space(6))
 
+            val previous = db.previousSessionSets(exerciseRecord.exerciseId, exerciseRecord.exerciseName, workoutId).associateBy { it.setNumber }
             db.getWorkoutSets(exerciseRecord.id).forEach { set ->
-                exerciseCard.addView(activeSetRow(set))
+                exerciseCard.addView(activeSetRow(set, previous[set.setNumber]))
             }
+            exerciseCard.addView(softButton("Edit sets") { showWorkoutExerciseEditor(workoutId, exerciseRecord) })
             root.addView(exerciseCard, matchWrapWithMargin(5))
         }
 
@@ -555,12 +986,18 @@ class MainActivity : Activity() {
         actions.addView(dangerButton("Discard") {
             confirm("Discard this workout?", "The active workout and its set entries will be deleted and will not appear in history.") {
                 db.discardWorkout(workoutId)
+                stopRestTimer()
                 stopUiTimers()
                 showDashboard()
+                offerUndo("Workout discarded") {
+                    if (db.getActiveWorkout() != null) toast("Finish the current workout before restoring this one.")
+                    else { db.undoDiscardWorkout(workoutId); showActiveWorkout(workoutId) }
+                }
             }
         }, LinearLayout.LayoutParams(0, dp(54), 1f).apply { rightMargin = dp(4) })
         actions.addView(button("Complete workout") {
             val latest = db.getWorkout(workoutId) ?: return@button
+            if (latest.totalSets == 0) { toast("Add an exercise and at least one set before completing."); return@button }
             val remaining = latest.totalSets - latest.completedSets
             if (remaining > 0) {
                 confirm("Complete with $remaining unticked sets?", "You can still save the workout, but those sets will remain marked incomplete in history.") {
@@ -574,13 +1011,15 @@ class MainActivity : Activity() {
         root.addView(space(20))
     }
 
-    private fun activeSetRow(set: WorkoutSetRecord): View {
+    private fun activeSetRow(set: WorkoutSetRecord, previous: WorkoutSetRecord? = null): View {
         val wrap = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(7), 0, dp(7))
         }
         val pct = set.percentage?.let { " · ${(it * 100).toInt()}%" } ?: ""
         wrap.addView(text("Set ${set.setNumber} · target ${set.targetReps}$pct · planned ${formatKg(set.plannedWeight)}", 14f, true))
+        wrap.addView(text(if (previous?.completed == true) "Last: ${formatKg(previous.actualWeight)} × ${previous.actualReps?.toString() ?: "—"} reps"
+            else "Last: no completed set recorded", 12f, false, COLOR_MUTED))
 
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -589,15 +1028,27 @@ class MainActivity : Activity() {
         val done = CheckBox(this).apply {
             isChecked = set.completed
             text = "Done"
-            setOnCheckedChangeListener { _, checked -> db.updateSetCompleted(set.id, checked) }
         }
         val weight = numberInput("kg", formatRaw(set.actualWeight))
         val reps = integerInput("reps", set.actualReps?.toString() ?: "")
+        done.setOnCheckedChangeListener { _, checked ->
+            val enteredWeight = weight.text.toString().toDoubleOrNull()
+            val enteredReps = reps.text.toString().toIntOrNull()
+            if (checked && (enteredWeight == null || !enteredWeight.isFinite() || enteredWeight < 0 || (reps.text.isNotBlank() && (enteredReps == null || enteredReps < 0)))) {
+                toast("Enter a valid weight and whole-number reps before marking Done.")
+                done.isChecked = false
+            } else db.updateSetCompleted(set.id, checked)
+        }
         weight.addTextChangedListener(simpleWatcher {
-            weight.text.toString().toDoubleOrNull()?.let { db.updateSetWeight(set.id, it) }
+            val value = weight.text.toString().toDoubleOrNull()
+            weight.error = if (value == null || !value.isFinite() || value < 0) "Enter a non-negative weight" else null
+            weight.text.toString().toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0 }?.let { db.updateSetWeight(set.id, it) }
         })
         reps.addTextChangedListener(simpleWatcher {
-            db.updateSetReps(set.id, reps.text.toString().toIntOrNull())
+            val value = reps.text.toString()
+            reps.error = if (value.isNotBlank() && (value.toIntOrNull() == null || (value.toIntOrNull() ?: -1) < 0)) "Enter non-negative whole-number reps" else null
+            if (value.isBlank()) db.updateSetReps(set.id, null)
+            else value.toIntOrNull()?.takeIf { it >= 0 }?.let { db.updateSetReps(set.id, it) }
         })
 
         row.addView(done, LinearLayout.LayoutParams(0, dp(50), 1.2f))
@@ -610,9 +1061,14 @@ class MainActivity : Activity() {
     private fun finishWorkout(workoutId: Long) {
         db.completeWorkout(workoutId)
         NotificationScheduler.dismissDay(this, LocalDate.now().dayOfWeek.value)
+        stopRestTimer()
         stopUiTimers()
         toast("Workout saved to history.")
         showHistoryDetail(workoutId)
+        AlertDialog.Builder(this).setTitle("Update the workout template?")
+            .setMessage("Save this workout's exercise list, order and manual sets/weights/reps for future sessions? 5/3/1 keeps its progression rules. Other templates will not be changed.")
+            .setPositiveButton("Update template") { _, _ -> saveWorkoutTemplate(workoutId) }
+            .setNegativeButton("Keep template", null).show()
     }
 
     private fun showHistory() {
@@ -637,6 +1093,13 @@ class MainActivity : Activity() {
             ))
         })
 
+        root.addView(sectionTitle("Workout history"))
+        if (workouts.isEmpty()) {
+            root.addView(infoCard("No completed workouts yet."))
+        } else {
+            workouts.forEach { addHistorySummary(it) }
+        }
+
         val records = db.getPersonalRecords()
         root.addView(sectionTitle("Personal records"))
         if (records.isEmpty()) {
@@ -656,16 +1119,11 @@ class MainActivity : Activity() {
                         "e1RM best: ${formatKg(record.e1rmWeight)} × ${record.e1rmReps} · ${formatDate(record.e1rmAt)}",
                         13f, false, COLOR_MUTED
                     ))
+                    addView(softButton("View progress") { showProgress(record.exerciseId, record.exerciseName) { showHistory() } })
                 }, matchWrapWithMargin(4))
             }
         }
 
-        root.addView(sectionTitle("Workout history"))
-        if (workouts.isEmpty()) {
-            root.addView(infoCard("No completed workouts yet."))
-            return
-        }
-        workouts.forEach { addHistorySummary(it) }
     }
 
     private fun addHistorySummary(summary: WorkoutSummary) {
@@ -682,6 +1140,17 @@ class MainActivity : Activity() {
             if (stats.prCount > 0) {
                 addView(space(8))
                 addView(prPill("★ ${stats.prCount} PR${if (stats.prCount == 1) "" else "s"}"))
+            }
+            db.getWorkoutExercises(summary.id).forEach { exercise ->
+                val sets = db.getWorkoutSets(exercise.id)
+                val completed = sets.filter { it.completed }
+                addView(space(12))
+                addView(text(exercise.exerciseName, 15f, true))
+                addView(text("${completed.size}/${sets.size} sets completed", 13f, false, COLOR_MUTED))
+                completed.forEach { set ->
+                    val reps = set.actualReps?.let { "$it reps" } ?: "reps not logged"
+                    addView(text("Set ${set.setNumber} · ${formatKg(set.actualWeight)} · $reps", 13f, false, COLOR_MUTED))
+                }
             }
             addView(space(9))
             addView(softButton("View workout") { showHistoryDetail(summary.id) })
@@ -719,6 +1188,11 @@ class MainActivity : Activity() {
             }
         })
 
+        root.addView(space(8))
+        root.addView(softButton("Edit this workout") { showWorkoutEditor(workoutId) })
+        root.addView(softButton("Update template from this workout") {
+            confirm("Update the template?", "Replace the template's exercises, order and manual set defaults with this workout. 5/3/1 progression is retained.") { saveWorkoutTemplate(workoutId) }
+        })
         root.addView(sectionTitle("Exercise breakdown"))
         db.getWorkoutExercises(workoutId).forEach { exercise ->
             val exStats = exerciseStats[exercise.id]
@@ -756,6 +1230,8 @@ class MainActivity : Activity() {
     }
 
     private fun startElapsedTimer(startedAt: Long, target: TextView) {
+        elapsedDisplay = target
+        elapsedStartedAt = startedAt
         elapsedRunnable?.let { handler.removeCallbacks(it) }
         val runnable = object : Runnable {
             override fun run() {
@@ -768,14 +1244,25 @@ class MainActivity : Activity() {
         handler.post(runnable)
     }
 
-    private fun startRestTimer(seconds: Int, target: TextView) {
+    private fun startRestTimer(seconds: Int, target: TextView, workoutId: Long) {
+        requestNotificationPermissionIfNeeded()
+        RestTimer.start(this, workoutId, seconds)
+        bindRestTimer(target, workoutId)
+    }
+
+    private fun bindRestTimer(target: TextView, workoutId: Long) {
+        restDisplay = target
+        restWorkoutId = workoutId
         restRunnable?.let { handler.removeCallbacks(it) }
-        restEndAt = System.currentTimeMillis() + seconds * 1000L
         val runnable = object : Runnable {
             override fun run() {
-                val remaining = ((restEndAt - System.currentTimeMillis()) / 1000L).coerceAtLeast(0L)
-                target.text = if (remaining > 0) "Rest: ${formatDuration(remaining)}" else "Rest complete"
-                if (remaining > 0) handler.postDelayed(this, 250L) else toast("Rest timer finished.")
+                val end = RestTimer.endAt(this@MainActivity)
+                val remaining = RestTimer.remainingSeconds(this@MainActivity)
+                if (RestTimer.workoutId(this@MainActivity) == workoutId) {
+                    target.text = if (remaining > 0) "Rest: ${formatDuration(remaining)}" else if (end > 0 || RestTimer.isComplete(this@MainActivity)) "Rest complete" else "Rest timer: ready"
+                    if (end > 0 && remaining == 0L && RestTimer.deliver(this@MainActivity, end)) toast("Rest timer finished.")
+                } else target.text = "Rest timer: ready"
+                handler.postDelayed(this, 250L)
             }
         }
         restRunnable = runnable
@@ -785,7 +1272,7 @@ class MainActivity : Activity() {
     private fun stopRestTimer() {
         restRunnable?.let { handler.removeCallbacks(it) }
         restRunnable = null
-        restEndAt = 0L
+        RestTimer.stop(this)
     }
 
     private fun stopUiTimers() {
@@ -797,6 +1284,9 @@ class MainActivity : Activity() {
 
     private fun setScreen(title: String, showNav: Boolean, backAction: (() -> Unit)? = null) {
         stopUiTimers()
+        restDisplay = null
+        elapsedDisplay = null
+        currentBackAction = backAction
         val screen = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(COLOR_BACKGROUND)
@@ -828,7 +1318,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         if (backAction != null) {
-            header.addView(ghostButton("‹ Back") { backAction() }, LinearLayout.LayoutParams(dp(92), dp(44)).apply { rightMargin = dp(8) })
+            header.addView(ghostButton("‹ Back") { backAction() }, LinearLayout.LayoutParams(dp(92), dp(48)).apply { rightMargin = dp(8) })
         }
         header.addView(text(title, 28f, true), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(header)
@@ -864,7 +1354,8 @@ class MainActivity : Activity() {
 
     private fun card(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(15), dp(15), dp(15), dp(15))
+        setPadding(dp(16), dp(16), dp(16), dp(16))
+        layoutParams = matchWrapWithMargin(6)
         elevation = dp(1).toFloat()
         background = roundedBackground(COLOR_SURFACE, COLOR_BORDER, 16)
     }
@@ -882,7 +1373,7 @@ class MainActivity : Activity() {
     }
 
     private fun label(value: String): TextView = text(value, 14f, true).apply {
-        setPadding(0, dp(9), 0, 0)
+        setPadding(0, dp(12), 0, dp(6))
     }
 
     private fun text(value: String, size: Float, bold: Boolean = false, color: Int = COLOR_TEXT): TextView =
@@ -890,11 +1381,12 @@ class MainActivity : Activity() {
             text = value
             textSize = size
             setTextColor(color)
+            setPadding(0, 0, 0, dp(4))
             if (bold) setTypeface(typeface, Typeface.BOLD)
             setLineSpacing(0f, 1.12f)
         }
 
-    private fun button(label: String, click: () -> Unit): Button = styledButton(label, COLOR_PRIMARY, Color.WHITE, click)
+    private fun button(label: String, click: () -> Unit): Button = styledButton(label, COLOR_PRIMARY, palette.onPrimary, click)
 
     private fun softButton(label: String, click: () -> Unit): Button = styledButton(label, COLOR_PRIMARY_SOFT, COLOR_PRIMARY, click)
 
@@ -914,13 +1406,27 @@ class MainActivity : Activity() {
             cornerRadius = dp(12).toFloat()
             if (stroke != null) setStroke(dp(1), stroke)
         }
+        // A custom drawable removes native button insets. Supply explicit
+        // content padding and spacing for every action, including View progress.
+        setPadding(dp(16), dp(10), dp(16), dp(10))
+        minHeight = dp(48)
+        minimumHeight = dp(48)
+        minWidth = 0
+        minimumWidth = 0
+        gravity = Gravity.CENTER
+        layoutParams = matchWrapWithMargin(4)
         setOnClickListener { click() }
     }
 
     private fun compactButton(label: String, click: () -> Unit): Button = softButton(label, click).apply {
-        setPadding(dp(3), 0, dp(3), 0)
+        setPadding(dp(6), dp(6), dp(6), dp(6))
         textSize = 12f
     }
+
+    private fun weightedActionParams(): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+            setMargins(dp(3), dp(4), dp(3), dp(4))
+        }
 
     private fun navButton(label: String, selected: Boolean, click: () -> Unit): Button = styledButton(
         label,
@@ -929,12 +1435,13 @@ class MainActivity : Activity() {
         click
     ).apply {
         textSize = 11f
-        setPadding(dp(2), 0, dp(2), 0)
+        setPadding(dp(4), dp(4), dp(4), dp(4))
         gravity = Gravity.CENTER
     }
 
     private fun statRow(vararg stats: Pair<String, String>): View = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
+        setPadding(dp(4), dp(4), dp(4), dp(4))
         stats.forEachIndexed { index, (label, value) ->
             addView(LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.VERTICAL
@@ -990,10 +1497,10 @@ class MainActivity : Activity() {
     }
 
     private fun inputBackground(input: EditText) {
-        input.setPadding(dp(11), 0, dp(11), 0)
+        input.setPadding(dp(12), dp(8), dp(12), dp(8))
         input.setTextColor(COLOR_TEXT)
         input.setHintTextColor(COLOR_MUTED)
-        input.background = roundedBackground(Color.WHITE, COLOR_BORDER, 11)
+        input.background = roundedBackground(palette.input, COLOR_BORDER, 11)
     }
 
     private fun simpleWatcher(after: () -> Unit): TextWatcher = object : TextWatcher {
@@ -1084,18 +1591,8 @@ class MainActivity : Activity() {
     private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
 
     companion object {
-        private val COLOR_BACKGROUND = Color.rgb(246, 247, 251)
-        private val COLOR_SURFACE = Color.WHITE
-        private val COLOR_TEXT = Color.rgb(28, 31, 42)
-        private val COLOR_MUTED = Color.rgb(105, 111, 128)
-        private val COLOR_BORDER = Color.rgb(229, 231, 239)
-        private val COLOR_PRIMARY = Color.rgb(93, 79, 219)
-        private val COLOR_PRIMARY_SOFT = Color.rgb(238, 235, 255)
-        private val COLOR_TEAL_SOFT = Color.rgb(229, 249, 245)
-        private val COLOR_DANGER = Color.rgb(196, 67, 80)
-        private val COLOR_DANGER_SOFT = Color.rgb(255, 235, 237)
-        private val COLOR_PR = Color.rgb(174, 104, 0)
-        private val COLOR_PR_SOFT = Color.rgb(255, 243, 208)
+        private const val REQUEST_EXPORT_DATA = 1001
+        private const val REQUEST_RESTORE_DATA = 1002
     }
 
 }
